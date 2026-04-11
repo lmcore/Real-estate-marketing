@@ -53,3 +53,53 @@ CREATE TABLE IF NOT EXISTS dvf_ingest_log (
     ingested_at  TEXT    NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (code_commune, year)
 );
+
+-- INSEE "Dossier complet" commune-level indicators.
+-- One row per (code_commune, millesime). Millesime = vintage year of the dataset
+-- (e.g. 2020 for the RP 2020 / FILOSOFI 2020 release).
+CREATE TABLE IF NOT EXISTS insee_commune (
+    code_commune            TEXT    NOT NULL,
+    millesime               INTEGER NOT NULL,
+
+    nom_commune             TEXT,
+    code_departement        TEXT,
+    code_region             TEXT,
+
+    -- Démographie
+    population              REAL,     -- habitants
+    superficie_km2          REAL,     -- km²
+    densite_hab_km2         REAL,     -- hab/km²
+
+    -- Logement
+    logements_total         REAL,
+    residences_principales  REAL,
+    residences_secondaires  REAL,
+    logements_vacants       REAL,
+    taux_vacance            REAL,     -- %
+    taux_residences_sec     REAL,     -- %
+    part_proprietaires      REAL,     -- %
+
+    -- Revenus (FILOSOFI)
+    revenu_median_uc        REAL,     -- EUR / unité de consommation / an
+    taux_pauvrete           REAL,     -- % à 60 %
+
+    -- Emploi
+    pop_active_1564         REAL,
+    taux_chomage_1564       REAL,     -- %
+
+    source_url              TEXT,
+    ingested_at             TEXT    NOT NULL DEFAULT (datetime('now')),
+
+    PRIMARY KEY (code_commune, millesime)
+);
+
+CREATE INDEX IF NOT EXISTS idx_insee_commune ON insee_commune (code_commune);
+CREATE INDEX IF NOT EXISTS idx_insee_dep     ON insee_commune (code_departement);
+
+CREATE TABLE IF NOT EXISTS insee_ingest_log (
+    source_url     TEXT    NOT NULL,
+    millesime      INTEGER NOT NULL,
+    rows_loaded    INTEGER NOT NULL,
+    ingested_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (source_url, millesime)
+);

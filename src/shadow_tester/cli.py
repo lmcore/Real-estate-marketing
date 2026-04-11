@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -10,13 +11,21 @@ from rich.table import Table
 
 from shadow_tester.config import get_settings
 from shadow_tester.dvf import compute_commune_stats, ingest_commune_years
+from shadow_tester.insee import (
+    ingest_from_file,
+    ingest_from_url,
+    load_commune,
+    summarize_commune,
+)
 
 app = typer.Typer(
     help="Shadow Tester — demand analyzer for real-estate projects based on public data.",
     no_args_is_help=True,
 )
 dvf_app = typer.Typer(help="DVF (Demandes de Valeurs Foncières) commands.", no_args_is_help=True)
+insee_app = typer.Typer(help="INSEE commune indicators commands.", no_args_is_help=True)
 app.add_typer(dvf_app, name="dvf")
+app.add_typer(insee_app, name="insee")
 
 console = Console()
 logger = logging.getLogger(__name__)
@@ -134,6 +143,161 @@ def dvf_stats(
             fmt_money(b.median_valeur),
         )
     console.print(table)
+
+
+@insee_app.command("ingest")
+def insee_ingest(
+    source: str = typer.Argument(
+        ...,
+        help="URL of the INSEE 'dossier complet' ZIP, or local path to a CSV / ZIP.",
+    ),
+    millesime: int = typer.Option(
+        ...,
+        "--millesime",
+        "-m",
+        help="Vintage year of the dataset (e.g. 2020 for RP 2020 / FILOSOFI 2020).",
+    ),
+    commune: str | None = typer.Option(
+        None,
+        "--commune",
+        "-c",
+        help="Optional INSEE commune code to filter to (default: load all communes).",
+    ),
+    force: bool = typer.Option(False, "--force", help="Re-download and re-extract."),
+) -> None:
+    """Ingest an INSEE 'Dossier Complet' file.
+
+    ``source`` can be either an HTTP(S) URL (e.g. to the dossier complet ZIP)
+    or a path to a local file already downloaded.
+    """
+    communes = [commune] if commune else None
+
+    if source.startswith(("http://", "https://")):
+        console.print(f"[bold]Ingesting INSEE[/] from URL millesime={millesime}")
+        result = ingest_from_url(
+            source, millesime=millesime, communes=communes, force=force
+        )
+    else:
+        path = Path(source).expanduser().resolve()
+        if not path.exists():
+            raise typer.BadParameter(f"{path} does not exist")
+        console.print(f"[bold]Ingesting INSEE[/] from {path} millesime={millesime}")
+        result = ingest_from_file(
+            path, millesime=millesime, communes=communes, source_url=str(path)
+        )
+
+    console.print(
+        f"[green]OK[/] millesime={result.millesime} rows_loaded={result.rows_loaded}"
+    )
+
+
+@insee_app.command("show")
+def insee_show(
+    commune: str | None = typer.Option(None, "--commune", "-c"),
+) -> None:
+    """Show the latest ingested INSEE indicators for a commune."""
+    settings = get_settings()
+    code = commune or settings.default_commune
+    row = load_commune(code)
+    if not row:
+        console.print(f"[yellow]No INSEE data for commune {code}[/]")
+        raise typer.Exit(code=1)
+
+    table = Table(title=f"INSEE — {row.get('nom_commune') or code} ({code})")
+    table.add_column("Indicator")
+    table.add_column("Value", justify="right")
+
+    def fmt(v: object, unit: str = "") -> str:
+        if v is None:
+            return "-"
+        if isinstance(v, float):
+            return f"{v:,.2f}".replace(",", " ") + (f" {unit}" if unit else "")
+        return f"{v}{(' ' + unit) if unit else ''}"
+
+    table.add_row("Millésime", str(row.get("millesime") or "-"))
+    table.add_row("Population", fmt(row.get("population"), "hab"))
+    table.add_row("Superficie", fmt(row.get("superficie_km2"), "km²"))
+    table.add_row("Densité", fmt(row.get("densite_hab_km2"), "hab/km²"))
+    table.add_row("Logements (total)", fmt(row.get("logements_total")))
+    table.add_row("Résidences principales", fmt(row.get("residences_principales")))
+    table.add_row("Résidences secondaires", fmt(row.get("residences_secondaires")))
+    table.add_row("Logements vacants", fmt(row.get("logements_vacants")))
+    table.add_row("Taux de vacance", fmt(row.get("taux_vacance"), "%"))
+    table.add_row("Part rés. secondaires", fmt(row.get("taux_residences_sec"), "%"))
+    table.add_row("Part propriétaires", fmt(row.get("part_proprietaires"), "%"))
+    table.add_row("Revenu médian (UC)", fmt(row.get("revenu_median_uc"), "€/an"))
+    table.add_row("Taux de pauvreté", fmt(row.get("taux_pauvrete"), "%"))
+    table.add_row("Population active 15-64", fmt(row.get("pop_active_1564")))
+    table.add_row("Taux chômage 15-64", fmt(row.get("taux_chomage_1564"), "%"))
+    console.print(table)
+
+
+@app.command("summary")
+def summary(
+    commune: str | None = typer.Option(None, "--commune", "-c"),
+) -> None:
+    """Print a cross-source (DVF + INSEE) market snapshot for a commune."""
+    settings = get_settings()
+    code = commune or settings.default_commune
+    s = summarize_commune(code)
+
+    console.print(
+        f"[bold]Shadow Tester — synthèse marché[/] "
+        f"[cyan]{s.nom_commune or code}[/] ({code})"
+    )
+
+    def money(v: float | None) -> str:
+        return f"{v:,.0f} €".replace(",", " ") if v is not None else "-"
+
+    def pct(v: float | None) -> str:
+        return f"{v:.1f} %" if v is not None else "-"
+
+    def num(v: float | None) -> str:
+        return f"{v:,.0f}".replace(",", " ") if v is not None else "-"
+
+    demo = Table(title="Démographie & revenus (INSEE)", show_header=False)
+    demo.add_column("Indicator")
+    demo.add_column("Value", justify="right")
+    demo.add_row("Population", num(s.population))
+    demo.add_row("Densité", num(s.densite_hab_km2) + " hab/km²" if s.densite_hab_km2 else "-")
+    demo.add_row("Revenu médian / UC", money(s.revenu_median_uc))
+    demo.add_row("Taux de vacance", pct(s.taux_vacance))
+    demo.add_row("Part rés. secondaires", pct(s.taux_residences_sec))
+    demo.add_row("Part propriétaires", pct(s.part_proprietaires))
+    demo.add_row("Taux de chômage 15-64", pct(s.taux_chomage_1564))
+    console.print(demo)
+
+    market = Table(
+        title=f"Marché immobilier DVF — {s.n_transactions} transactions"
+        + (f" (année de référence {s.year_dvf})" if s.year_dvf else "")
+    )
+    market.add_column("Type")
+    market.add_column("Médian €/m²", justify="right")
+    market.add_column("Prix médian", justify="right")
+    market.add_column("Affordability", justify="right")
+    market.add_row(
+        "Maison",
+        money(s.median_prix_m2_maison),
+        money(s.median_valeur_maison),
+        f"{s.affordability_years_maison}× revenu/an" if s.affordability_years_maison else "-",
+    )
+    market.add_row(
+        "Appartement",
+        money(s.median_prix_m2_appartement),
+        money(s.median_valeur_appartement),
+        f"{s.affordability_years_appartement}× revenu/an"
+        if s.affordability_years_appartement
+        else "-",
+    )
+    console.print(market)
+
+    if s.affordability_years_maison is not None:
+        if s.affordability_years_maison < 6:
+            console.print("[green]→ marché abordable[/] (< 6× revenu annuel médian)")
+        elif s.affordability_years_maison < 9:
+            console.print("[yellow]→ marché tendu[/] (6–9× revenu annuel)")
+        else:
+            console.print("[red]→ marché très tendu[/] (> 9× revenu annuel)")
 
 
 @app.command("info")
