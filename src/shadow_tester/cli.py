@@ -9,6 +9,8 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from shadow_tester.comps import Target, find_comparables, geocode
+from shadow_tester.comps.geocoding import GeocodingError
 from shadow_tester.config import get_settings
 from shadow_tester.dvf import compute_commune_stats, ingest_commune_years
 from shadow_tester.insee import (
@@ -24,8 +26,10 @@ app = typer.Typer(
 )
 dvf_app = typer.Typer(help="DVF (Demandes de Valeurs Foncières) commands.", no_args_is_help=True)
 insee_app = typer.Typer(help="INSEE commune indicators commands.", no_args_is_help=True)
+comps_app = typer.Typer(help="Comparable-properties engine.", no_args_is_help=True)
 app.add_typer(dvf_app, name="dvf")
 app.add_typer(insee_app, name="insee")
+app.add_typer(comps_app, name="comps")
 
 console = Console()
 logger = logging.getLogger(__name__)
@@ -298,6 +302,168 @@ def summary(
             console.print("[yellow]→ marché tendu[/] (6–9× revenu annuel)")
         else:
             console.print("[red]→ marché très tendu[/] (> 9× revenu annuel)")
+
+
+@comps_app.command("find")
+def comps_find(
+    commune: str | None = typer.Option(None, "--commune", "-c", help="INSEE commune code."),
+    type_local: str = typer.Option(
+        ..., "--type", "-t", help="'Maison' or 'Appartement'.",
+    ),
+    surface: float = typer.Option(..., "--surface", "-s", help="Target built surface (m²)."),
+    rooms: int | None = typer.Option(None, "--rooms", "-r", help="Number of main rooms."),
+    budget: float | None = typer.Option(
+        None, "--budget", "-b", help="Target total price in EUR (triggers a verdict vs the fourchette)."
+    ),
+    address: str | None = typer.Option(
+        None,
+        "--address",
+        "-a",
+        help="Exact address to geocode via the BAN for distance ranking "
+        "(e.g. '12 rue des Alpes, 04100 Manosque').",
+    ),
+    lat: float | None = typer.Option(None, "--lat", help="Latitude (bypasses geocoding)."),
+    lon: float | None = typer.Option(None, "--lon", help="Longitude (bypasses geocoding)."),
+    street: str | None = typer.Option(
+        None,
+        "--street",
+        help="Street/quartier keyword: substring match on DVF 'adresse_nom_voie'.",
+    ),
+    radius: float = typer.Option(
+        5.0, "--radius", help="Distance radius (km) for the distance score."
+    ),
+    surface_tol: float = typer.Option(
+        0.25, "--surface-tol", help="Surface tolerance as a fraction (0.25 = ±25%)."
+    ),
+    years: int = typer.Option(5, "--years", help="Max age (years) for DVF comps."),
+    limit: int = typer.Option(10, "--limit", "-n", help="Max number of comps to return."),
+) -> None:
+    """Find DVF transactions comparable to a target bien."""
+    settings = get_settings()
+    code = commune or settings.default_commune
+
+    # Resolve geographic anchor.
+    anchor_lat, anchor_lon = lat, lon
+    anchor_label: str | None = None
+    if address and (lat is None or lon is None):
+        try:
+            result = geocode(address, citycode=code)
+        except GeocodingError as exc:
+            console.print(f"[red]Geocoding failed:[/] {exc}")
+            raise typer.Exit(code=2) from exc
+        if result is None:
+            console.print(
+                f"[yellow]BAN returned no match for {address!r}[/] — "
+                "falling back to commune-wide search."
+            )
+        else:
+            anchor_lat, anchor_lon = result.lat, result.lon
+            anchor_label = result.label
+            precision = "précis" if result.is_precise else f"approximatif ({result.feature_type})"
+            console.print(
+                f"[green]Geocoded[/] → {result.label} "
+                f"(score {result.score:.2f}, {precision})"
+            )
+
+    try:
+        target = Target(
+            commune=code,
+            type_local=type_local,
+            surface=surface,
+            rooms=rooms,
+            budget=budget,
+            address=address,
+            lat=anchor_lat,
+            lon=anchor_lon,
+            street_keyword=street,
+            surface_tol=surface_tol,
+            radius_km=radius,
+            max_years_old=years,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    result = find_comparables(target)
+
+    # Target panel
+    target_tbl = Table(title="Target", show_header=False)
+    target_tbl.add_column("Field")
+    target_tbl.add_column("Value")
+    target_tbl.add_row("Commune", code)
+    target_tbl.add_row("Type", target.type_local)
+    target_tbl.add_row("Surface", f"{target.surface:.0f} m² (±{target.surface_tol*100:.0f}%)")
+    if target.rooms:
+        target_tbl.add_row("Pièces", str(target.rooms))
+    if target.budget:
+        target_tbl.add_row("Budget", f"{target.budget:,.0f} €".replace(",", " "))
+    if anchor_label:
+        target_tbl.add_row("Anchor (BAN)", anchor_label)
+    elif anchor_lat is not None and anchor_lon is not None:
+        target_tbl.add_row("Anchor", f"({anchor_lat:.5f}, {anchor_lon:.5f})")
+    elif target.street_keyword:
+        target_tbl.add_row("Anchor", f"street~{target.street_keyword!r}")
+    else:
+        target_tbl.add_row("Anchor", "[dim]commune-wide[/]")
+    console.print(target_tbl)
+
+    if not result.comps:
+        console.print(
+            "[yellow]No comparable transactions found[/] with these filters. "
+            "Try widening --surface-tol or --years, or drop --street / --address."
+        )
+        raise typer.Exit(code=1)
+
+    # Comps table
+    comps_tbl = Table(
+        title=f"Top {len(result.comps)} comparables "
+        f"(confidence: {result.confidence})"
+    )
+    comps_tbl.add_column("Score", justify="right")
+    comps_tbl.add_column("Date")
+    comps_tbl.add_column("Dist.", justify="right")
+    comps_tbl.add_column("Surface", justify="right")
+    comps_tbl.add_column("Pièces", justify="right")
+    comps_tbl.add_column("Adresse")
+    comps_tbl.add_column("Prix", justify="right")
+    comps_tbl.add_column("€/m²", justify="right")
+
+    def fmt_eur(v: float | None) -> str:
+        return f"{v:,.0f} €".replace(",", " ") if v is not None else "-"
+
+    for c in result.comps:
+        comps_tbl.add_row(
+            f"{c.total_score:.2f}",
+            c.date_mutation,
+            f"{c.distance_km:.2f} km" if c.distance_km is not None else "-",
+            f"{c.surface:.0f} m²",
+            str(c.rooms) if c.rooms is not None else "-",
+            c.adresse,
+            fmt_eur(c.valeur_fonciere),
+            fmt_eur(c.prix_m2),
+        )
+    console.print(comps_tbl)
+
+    # Aggregate / suggested price fourchette
+    if result.median_prix_m2 is not None:
+        agg = Table(title="Fourchette de prix suggérée", show_header=False)
+        agg.add_column("Metric")
+        agg.add_column("Value", justify="right")
+        agg.add_row("P25 €/m²", fmt_eur(result.p25_prix_m2))
+        agg.add_row("Médian €/m²", fmt_eur(result.median_prix_m2))
+        agg.add_row("P75 €/m²", fmt_eur(result.p75_prix_m2))
+        agg.add_row("Prix bas (P25)", fmt_eur(result.suggested_price_low))
+        agg.add_row("Prix médian", fmt_eur(result.suggested_price_mid))
+        agg.add_row("Prix haut (P75)", fmt_eur(result.suggested_price_high))
+        console.print(agg)
+
+    if result.verdict:
+        color = (
+            "red" if "au-dessus" in result.verdict
+            else "green" if "dans" in result.verdict
+            else "yellow"
+        )
+        console.print(f"[bold {color}]→ {result.verdict}[/]")
 
 
 @app.command("info")

@@ -14,7 +14,10 @@ trompeur pour les particuliers), Shadow Tester exploite :
 - **DVF** — *Demandes de Valeurs Foncières* (data.gouv.fr) : l'ensemble des transactions
   immobilières réelles en France depuis 2014, avec prix, surface, type de bien,
   géolocalisation.
-- **INSEE** (à venir) : démographie, revenus médians, taux de vacance, tension locative.
+- **INSEE Dossier Complet** : démographie, revenus médians, taux de vacance, tension
+  locative.
+- **BAN** — *Base Adresse Nationale* : géocodeur officiel français, utilisé pour
+  transformer une adresse exacte en lat/lon et comparer les biens par proximité.
 - **Indices notariaux** (à venir) : évolution des prix sur 12 / 24 / 60 mois.
 
 Ces sources donnent une image factuelle du marché, là où une fausse annonce ne donne
@@ -28,7 +31,7 @@ qu'un signal bruité et artificiel.
 | `storage` — SQLite | ✅ v1 |
 | `market` — stats prix/m² | ✅ v1 (basique) |
 | `insee` — indicateurs communaux + affordability | ✅ v1 |
-| `comps` — biens comparables | ⏳ à venir |
+| `comps` — biens comparables + géocodage BAN | ✅ v1 |
 | `dashboard` — Streamlit | ⏳ à venir |
 | `forecaster` — marge après travaux | ⏳ à venir |
 
@@ -58,6 +61,22 @@ shadow-tester insee show --commune 04112
 
 # 5. Synthèse croisée DVF + INSEE + indice d'affordability
 shadow-tester summary --commune 04112
+
+# 6. Trouver les biens comparables à un projet d'acquisition
+#    — ancrage par adresse exacte (géocodage BAN)
+shadow-tester comps find \
+    --commune 04112 --type Maison --surface 100 --rooms 4 \
+    --address "12 rue des Alpes, Manosque" \
+    --budget 280000
+
+#    — ou par coordonnées directes (plus rapide, pas de réseau)
+shadow-tester comps find \
+    --commune 04112 --type Maison --surface 100 \
+    --lat 43.8300 --lon 5.7846 --radius 2
+
+#    — ou par mot-clé de voie (filtre dur sur adresse_nom_voie)
+shadow-tester comps find \
+    --commune 04112 --type Maison --surface 100 --street alpes
 ```
 
 Exemple de sortie `summary` :
@@ -86,6 +105,56 @@ médian annuel du ménage** (revenu FILOSOFI par UC × 1.6 UC/ménage). C'est le
 même indicateur que celui utilisé par l'OCDE et par les rapports annuels des
 notaires pour classer la tension des marchés.
 
+### Biens comparables (`comps find`)
+
+Pour valider un prix d'acquisition, `comps find` cherche dans DVF les
+transactions réellement comparables au bien visé (même commune, même type,
+surface dans la tolérance, année dans la fenêtre), calcule un score de
+similarité et en déduit une fourchette €/m² + un verdict vs budget.
+
+Exemple de sortie :
+
+```
+Cible
+┌──────────────┬───────────────────────────┐
+│ Commune      │ 04112                     │
+│ Type         │ Maison                    │
+│ Surface      │ 100 m²  (±25%)            │
+│ Pièces       │ 4                         │
+│ Budget       │ 280 000 €                 │
+│ Ancre        │ 43.8300, 5.7846 (2.0 km)  │
+│ Fenêtre      │ 5 dernières années        │
+└──────────────┴───────────────────────────┘
+Top 4 comparables
+┏━━━━━━┳━━━━━━━━━━━━┳━━━━━━━┳━━━━━━┳━━━━━━┳━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━┓
+┃ Score┃ Date       ┃   Dist┃ Surf ┃ Piè. ┃ Adresse           ┃     Prix  ┃  €/m²  ┃
+┣━━━━━━╋━━━━━━━━━━━━╋━━━━━━━╋━━━━━━╋━━━━━━╋━━━━━━━━━━━━━━━━━━━╋━━━━━━━━━━━╋━━━━━━━━┫
+│ 1.00 │ 2024-03-10 │ 0.0km │ 100  │  4   │ 12 RUE DES ALPES  │ 270 000 € │ 2 700  │
+│ 0.93 │ 2024-05-18 │ 0.1km │ 110  │  5   │ 24 RUE DES ALPES  │ 295 000 € │ 2 682  │
+│ 0.82 │ 2024-09-05 │ 0.5km │  90  │  4   │ 8 AV. JEAN GIONO  │ 250 000 € │ 2 778  │
+│ 0.75 │ 2022-07-14 │ 0.1km │  85  │  3   │ 45 RUE DES ALPES  │ 215 000 € │ 2 529  │
+└──────┴────────────┴───────┴──────┴──────┴───────────────────┴───────────┴────────┘
+Fourchette marché (P25 / médiane / P75)
+┌──────────────┬─────────────┬─────────────┐
+│       2 644 €│     2 691 € │     2 719 € │
+│ 264 400 €    │  269 100 €  │  271 900 €  │
+└──────────────┴─────────────┴─────────────┘
+→ Budget au-dessus de la fourchette — risque de payer trop cher vs marché.
+```
+
+Trois modes d'ancrage géographique sont supportés :
+
+- `--address "12 rue des Alpes, Manosque"` : géocodage exact via BAN (résultat
+  mis en cache dans SQLite, pas de re-requête à chaque run).
+- `--lat / --lon` + `--radius` : ancrage direct par coordonnées, utile quand
+  on n'a pas de réseau ou qu'on veut tester une zone plutôt qu'un point.
+- `--street alpes` : filtre dur sur un mot-clé de voie — pratique quand on
+  n'a pas de numéro de rue et qu'on veut juste rester "dans le quartier".
+
+Le score de chaque comp est une moyenne pondérée :
+**surface 35% + distance 30% + récence 20% + pièces 15%**. Les poids sont
+volontairement visibles (`scoring.py`) et faciles à tuner.
+
 Les données brutes sont mises en cache dans `data/cache/` et chargées dans
 `data/shadow_tester.sqlite`.
 
@@ -106,6 +175,11 @@ src/shadow_tester/
 │   ├── parser.py       # Parsing + indicateurs dérivés (densité, vacance, …)
 │   ├── ingest.py       # Chargement en base
 │   └── indicators.py   # Synthèse croisée DVF + INSEE (affordability)
+├── comps/
+│   ├── models.py       # Target, Comp, CompResult (dataclasses)
+│   ├── geocoding.py    # Client BAN + cache SQLite (ban_cache)
+│   ├── scoring.py      # Haversine + sous-scores + pondération
+│   └── engine.py       # find_comparables (SQL + ranking + fourchette)
 └── storage/
     ├── db.py           # Connexion SQLite
     └── schema.sql      # Schéma des tables
@@ -115,6 +189,8 @@ src/shadow_tester/
 
 - **DVF Géo** (Etalab) : https://files.data.gouv.fr/geo-dvf/latest/csv/
 - **INSEE Dossier Complet** : https://www.insee.fr/fr/statistiques/2011101
+- **BAN — Base Adresse Nationale** : https://adresse.data.gouv.fr/ (API
+  `api-adresse.data.gouv.fr`, libre, sans authentification)
 - Code commune Manosque : `04112`
 
 ## Licence

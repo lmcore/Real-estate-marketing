@@ -103,3 +103,17 @@ CREATE TABLE IF NOT EXISTS insee_ingest_log (
     ingested_at    TEXT    NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (source_url, millesime)
 );
+
+-- Cache for BAN (Base Adresse Nationale) geocoding lookups.
+-- The raw query string is the key so we can remember misses too.
+CREATE TABLE IF NOT EXISTS ban_cache (
+    query         TEXT    NOT NULL,
+    citycode      TEXT,                -- optional INSEE commune filter
+    lat           REAL,
+    lon           REAL,
+    label         TEXT,
+    score         REAL,                -- BAN confidence 0..1
+    feature_type  TEXT,                -- housenumber, street, locality, ...
+    cached_at     TEXT    NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (query, citycode)
+);
