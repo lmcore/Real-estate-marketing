@@ -131,6 +131,12 @@ shadow-tester listings match --auto --yes
 #     — négo, délai, €/m² par condition (brut/à rénover/partiel/rénové)
 shadow-tester listings stats --commune 04112
 shadow-tester listings stats --commune 04112 --type Maison
+
+# 11. Analyse photo par IA (Claude Vision)
+#     — détecte l'état du bien depuis les photos de l'annonce
+#     — nécessite ANTHROPIC_API_KEY (ou SHADOW_ANTHROPIC_API_KEY)
+shadow-tester listings add --url https://www.leboncoin.fr/... \
+    --commune 04112 --analyze-photos
 ```
 
 Exemple de sortie `summary` :
@@ -247,6 +253,25 @@ Agrège les annonces capturées par condition et affiche :
 - Marge de négociation médiane (DVF vs prix demandé)
 - Délai médian de commercialisation (jours entre première vue et vente DVF)
 
+### Analyse photo par IA (`--analyze-photos`)
+
+Quand `--analyze-photos` (ou `--vision`) est passé à `listings add`, les
+photos de l'annonce sont envoyées à Claude Vision (API Anthropic) pour
+analyser visuellement l'état du bien. Le modèle examine :
+
+- État des murs, sols, plafonds
+- Cuisine / salle de bain (datée vs moderne)
+- Menuiseries, électricité, humidité visible
+- Niveau général de finition
+
+Le résultat Vision prend le dessus sur la détection par mots-clés quand
+il est plus confiant. Nécessite `ANTHROPIC_API_KEY` (ou
+`SHADOW_ANTHROPIC_API_KEY`) dans l'environnement ou `.env`.
+
+Configuration optionnelle (via env) :
+- `SHADOW_VISION_MODEL` : modèle Claude à utiliser (défaut : `claude-sonnet-4-20250514`)
+- `SHADOW_VISION_MAX_PHOTOS` : nombre max de photos envoyées (défaut : 4)
+
 Les données brutes sont mises en cache dans `data/cache/` et chargées dans
 `data/shadow_tester.sqlite`.
 
@@ -282,6 +307,7 @@ src/shadow_tester/
 │   ├── fetch.py        # Fetch URL (httpx, rate-limited, user-initiated)
 │   ├── matcher.py      # DVF↔listing matching (score pondéré 5 axes)
 │   ├── stats.py        # Stats agrégées par état (négo, délai, €/m²)
+│   ├── vision.py       # Analyse photos via Claude Vision (Anthropic API)
 │   └── repo.py         # CRUD SQLite
 └── storage/
     ├── db.py           # Connexion SQLite

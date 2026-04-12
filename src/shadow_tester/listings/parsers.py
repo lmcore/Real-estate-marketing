@@ -50,6 +50,7 @@ class _JSONLDExtractor(HTMLParser):
         self._in_title = False
         self.title: str | None = None
         self.meta: dict[str, str] = {}
+        self.img_srcs: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attr_dict = dict(attrs)
@@ -64,6 +65,10 @@ class _JSONLDExtractor(HTMLParser):
             content = attr_dict.get("content", "")
             if name and content:
                 self.meta[name.lower()] = content
+        if tag == "img":
+            src = attr_dict.get("src") or attr_dict.get("data-src") or ""
+            if src and src.startswith(("http://", "https://")):
+                self.img_srcs.append(src)
 
     def handle_data(self, data: str) -> None:
         if self._in_jsonld:
@@ -239,6 +244,21 @@ def parse_listing_html(html: str) -> ParsedListing:
     _extract_from_meta(extractor.meta, result)
 
     result.source = _detect_source(html)
+
+    # Fill image list from meta og:image and <img> tags when JSON-LD had none.
+    if not result.images:
+        og_image = extractor.meta.get("og:image")
+        if og_image and og_image.startswith(("http://", "https://")):
+            result.images.append(og_image)
+    if not result.images and extractor.img_srcs:
+        # Take up to 10 distinct image URLs from <img> tags.
+        seen: set[str] = set()
+        for src in extractor.img_srcs:
+            if src not in seen:
+                seen.add(src)
+                result.images.append(src)
+                if len(result.images) >= 10:
+                    break
 
     if not result.title:
         result.title = extractor.title

@@ -18,6 +18,7 @@ from shadow_tester.listings.repo import (
     update_listing,
 )
 from shadow_tester.listings.stats import ConditionBucket, ListingStats, compute_listing_stats
+from shadow_tester.listings.vision import VisionError, VisionResult, analyze_photos
 
 __all__ = [
     "ConditionBucket",
@@ -28,7 +29,10 @@ __all__ = [
     "MatchCandidate",
     "MatchResult",
     "ParsedListing",
+    "VisionError",
+    "VisionResult",
     "add_listing",
+    "analyze_photos",
     "compute_listing_stats",
     "delete_listing",
     "detect_condition",

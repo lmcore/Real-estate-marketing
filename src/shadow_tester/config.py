@@ -41,6 +41,19 @@ class Settings(BaseSettings):
         default="https://files.data.gouv.fr/geo-dvf/latest/csv",
         description="Base URL for Etalab's geo-DVF CSV files.",
     )
+    anthropic_api_key: str | None = Field(
+        default=None,
+        description="Anthropic API key for Claude Vision photo analysis. "
+        "Set via SHADOW_ANTHROPIC_API_KEY or ANTHROPIC_API_KEY env var.",
+    )
+    vision_model: str = Field(
+        default="claude-sonnet-4-20250514",
+        description="Claude model to use for photo condition analysis.",
+    )
+    vision_max_photos: int = Field(
+        default=4,
+        description="Max photos to send for vision analysis (controls cost).",
+    )
     log_level: str = Field(default="INFO")
 
     def ensure_dirs(self) -> None:
@@ -60,4 +73,9 @@ def get_settings() -> Settings:
             level=_settings.log_level,
             format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
         )
+        # Fallback: accept bare ANTHROPIC_API_KEY env var (standard convention).
+        if _settings.anthropic_api_key is None:
+            import os
+
+            _settings.anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
     return _settings

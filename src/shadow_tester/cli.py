@@ -37,6 +37,13 @@ from shadow_tester.listings.matcher import (
 )
 from shadow_tester.listings.repo import update_listing as _update_listing
 from shadow_tester.listings.stats import compute_listing_stats
+from shadow_tester.listings.vision import (
+    VisionError,
+    vision_to_condition_detection,
+)
+from shadow_tester.listings.vision import (
+    analyze_photos as run_vision_analysis,
+)
 from shadow_tester.notes import (
     ALLOWED_CONDITIONS,
     ALLOWED_SOURCES,
@@ -704,6 +711,10 @@ def listings_add_cmd(
     ),
     title: str | None = typer.Option(None, "--title", help="Listing title."),
     description: str | None = typer.Option(None, "--description", "-d", help="Listing description text."),
+    analyze_photos: bool = typer.Option(
+        False, "--analyze-photos", "--vision",
+        help="Use Claude Vision to detect condition from listing photos (requires API key).",
+    ),
     note: str | None = typer.Option(None, "--note", "-n", help="Free-form observation."),
 ) -> None:
     """Capture a listing from a URL, saved HTML file, or manual fields.
@@ -715,6 +726,7 @@ def listings_add_cmd(
     raw_html: str | None = None
     parsed_lat: float | None = None
     parsed_lon: float | None = None
+    parsed_images: list[str] = []
 
     # Mode 1: URL fetch — the simplest path.
     if url is not None and html_file is None:
@@ -743,6 +755,7 @@ def listings_add_cmd(
         parsed_html_source = parsed.source
         parsed_lat = parsed.lat
         parsed_lon = parsed.lon
+        parsed_images = parsed.images
 
     # Mode 2: local HTML file.
     elif html_file is not None:
@@ -767,6 +780,7 @@ def listings_add_cmd(
         parsed_html_source = parsed.source
         parsed_lat = parsed.lat
         parsed_lon = parsed.lon
+        parsed_images = parsed.images
 
     # Mode 3: fully manual — no parsing needed.
 
@@ -794,6 +808,36 @@ def listings_add_cmd(
             )
         else:
             console.print(f"[dim]Condition non détectée: {cond_rationale}[/]")
+
+    # Vision analysis: override/improve keyword detection when photos are available.
+    if analyze_photos and parsed_images and not condition:
+        console.print(
+            f"[cyan]Analyse photo Claude Vision[/] ({len(parsed_images)} image(s) trouvées)…"
+        )
+        try:
+            vision_result = run_vision_analysis(
+                parsed_images,
+                description=final_description,
+            )
+            vision_det = vision_to_condition_detection(vision_result)
+            # Vision takes priority over keywords when it's more confident.
+            if (
+                vision_det.condition != "inconnu"
+                and (cond_val in (None, "inconnu") or vision_det.confidence > (cond_confidence or 0))
+            ):
+                cond_val = vision_det.condition
+                cond_source = "vision"
+                cond_confidence = vision_det.confidence
+                cond_rationale = vision_det.rationale
+            console.print(
+                f"[green]Vision:[/] {vision_result.condition} "
+                f"(confiance {vision_result.confidence:.0%}, "
+                f"{vision_result.photos_analyzed} photo(s)) — {vision_result.rationale}"
+            )
+        except VisionError as exc:
+            console.print(f"[yellow]Vision non disponible:[/] {exc}")
+    elif analyze_photos and not parsed_images:
+        console.print("[yellow]--analyze-photos: aucune photo trouvée dans l'annonce.[/]")
 
     try:
         listing = Listing(
