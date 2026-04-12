@@ -95,6 +95,24 @@ shadow-tester notes add \
 shadow-tester notes list --commune 04112
 shadow-tester notes show 1
 shadow-tester notes delete 1
+
+# 8. Capturer une annonce (LBC, SeLoger, PAP…)
+#    — depuis un fichier HTML sauvegardé (condition auto-détectée)
+shadow-tester listings add --html-file page_lbc.html --commune 04112
+
+#    — saisie manuelle rapide
+shadow-tester listings add \
+    --price 295000 --surface 110 --rooms 4 --type Maison \
+    --commune 04112 --address "24 rue des Alpes" \
+    --source leboncoin --condition "à rénover"
+
+#    — ou avec description texte (détection automatique de l'état)
+shadow-tester listings add --commune 04112 --type Maison --price 320000 \
+    --description "Belle maison entièrement rénovée, clé en main"
+
+# Lister / afficher les annonces capturées
+shadow-tester listings list --commune 04112
+shadow-tester listings show 3
 ```
 
 Exemple de sortie `summary` :
@@ -201,6 +219,11 @@ src/shadow_tester/
 ├── notes/
 │   ├── models.py       # PropertyNote + validation condition/source
 │   └── repo.py         # CRUD SQLite (add, list, get, delete, update)
+├── listings/
+│   ├── models.py       # Listing dataclass
+│   ├── condition.py    # Détection état par mots-clés (heuristiques FR)
+│   ├── parsers.py      # Extraction JSON-LD / meta depuis HTML sauvegardé
+│   └── repo.py         # CRUD SQLite
 └── storage/
     ├── db.py           # Connexion SQLite
     └── schema.sql      # Schéma des tables

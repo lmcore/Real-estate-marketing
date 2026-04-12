@@ -19,6 +19,15 @@ from shadow_tester.insee import (
     load_commune,
     summarize_commune,
 )
+from shadow_tester.listings import (
+    Listing,
+    add_listing,
+    delete_listing,
+    detect_condition,
+    get_listing,
+    list_listings,
+    parse_listing_html,
+)
 from shadow_tester.notes import (
     ALLOWED_CONDITIONS,
     ALLOWED_SOURCES,
@@ -37,10 +46,12 @@ dvf_app = typer.Typer(help="DVF (Demandes de Valeurs Foncières) commands.", no_
 insee_app = typer.Typer(help="INSEE commune indicators commands.", no_args_is_help=True)
 comps_app = typer.Typer(help="Comparable-properties engine.", no_args_is_help=True)
 notes_app = typer.Typer(help="User property notes (condition, travaux, observations).", no_args_is_help=True)
+listings_app = typer.Typer(help="Capture & analyse real-estate listings.", no_args_is_help=True)
 app.add_typer(dvf_app, name="dvf")
 app.add_typer(insee_app, name="insee")
 app.add_typer(comps_app, name="comps")
 app.add_typer(notes_app, name="notes")
+app.add_typer(listings_app, name="listings")
 
 console = Console()
 logger = logging.getLogger(__name__)
@@ -652,6 +663,254 @@ def notes_delete(
         console.print(f"[green]Note #{note_id} supprimée.[/]")
     else:
         console.print(f"[red]Échec de la suppression de #{note_id}.[/]")
+
+
+# ---------- Listings subcommands ----------
+
+
+@listings_app.command("add")
+def listings_add_cmd(
+    html_file: Path | None = typer.Option(
+        None, "--html-file", "-f",
+        help="Path to a saved HTML file to parse (LBC, SeLoger, etc.).",
+    ),
+    price: float | None = typer.Option(None, "--price", "-p", help="Asking price (EUR)."),
+    surface: float | None = typer.Option(None, "--surface", "-s", help="Surface (m²)."),
+    rooms: int | None = typer.Option(None, "--rooms", "-r", help="Number of rooms."),
+    type_local: str | None = typer.Option(
+        None, "--type", "-t", help="'Maison' or 'Appartement'.",
+    ),
+    commune: str | None = typer.Option(None, "--commune", "-c", help="INSEE commune code."),
+    address: str | None = typer.Option(None, "--address", "-a", help="Approximate address."),
+    condition: str | None = typer.Option(
+        None, "--condition",
+        help="Property condition (brut/a_renover/partiel/renove). Omit to auto-detect from description.",
+    ),
+    source_name: str | None = typer.Option(
+        None, "--source", help="Platform name (leboncoin/seloger/pap/autre).",
+    ),
+    url: str | None = typer.Option(None, "--url", help="Listing URL (for reference)."),
+    title: str | None = typer.Option(None, "--title", help="Listing title."),
+    description: str | None = typer.Option(None, "--description", "-d", help="Listing description text."),
+    note: str | None = typer.Option(None, "--note", "-n", help="Free-form observation."),
+) -> None:
+    """Capture a listing from a saved HTML file or manual fields."""
+    parsed_html_source: str | None = None
+    parsed_description: str | None = None
+    raw_html: str | None = None
+
+    if html_file is not None:
+        if not html_file.exists():
+            console.print(f"[red]File not found:[/] {html_file}")
+            raise typer.Exit(code=1)
+        raw_html = html_file.read_text(encoding="utf-8", errors="replace")
+        parsed = parse_listing_html(raw_html)
+        console.print(
+            f"[green]Parsed[/] {html_file.name}: "
+            f"title={parsed.title!r}, price={parsed.price}, "
+            f"surface={parsed.surface}, rooms={parsed.rooms}, "
+            f"type={parsed.type_local}, source={parsed.source}"
+        )
+        # Populate from parsed, but CLI flags override.
+        price = price or parsed.price
+        surface = surface or parsed.surface
+        rooms = rooms if rooms is not None else parsed.rooms
+        type_local = type_local or parsed.type_local
+        address = address or parsed.address
+        title = title or parsed.title
+        parsed_description = parsed.description
+        parsed_html_source = parsed.source
+        if parsed.lat and not (url or address):
+            lat, lon = parsed.lat, parsed.lon
+        else:
+            lat, lon = None, None
+    else:
+        lat, lon = None, None
+
+    final_description = description or parsed_description
+    final_source = source_name or parsed_html_source or "autre"
+
+    # Auto-detect condition from description if not provided.
+    cond_val = condition
+    cond_source = "manual" if condition else None
+    cond_confidence = 1.0 if condition else None
+    cond_rationale: str | None = None
+    if not cond_val and final_description:
+        detection = detect_condition(final_description)
+        cond_val = detection.condition
+        cond_source = "keywords"
+        cond_confidence = detection.confidence
+        cond_rationale = detection.rationale
+        if cond_val != "inconnu":
+            console.print(
+                f"[cyan]Condition auto-détectée:[/] {cond_val} "
+                f"(confiance {cond_confidence:.0%}) — {cond_rationale}"
+            )
+        else:
+            console.print(f"[dim]Condition non détectée: {cond_rationale}[/]")
+
+    try:
+        listing = Listing(
+            source=final_source,
+            url=url,
+            title=title,
+            description=final_description,
+            price_asked=price,
+            surface=surface,
+            rooms=rooms,
+            type_local=type_local,
+            commune=commune,
+            adresse_approx=address,
+            lat=lat,
+            lon=lon,
+            condition=cond_val,
+            condition_source=cond_source,
+            condition_confidence=cond_confidence,
+            condition_rationale=cond_rationale,
+            raw_html=raw_html,
+            notes=note,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    saved = add_listing(listing)
+    console.print(
+        f"[green]Listing #{saved.id} ajouté[/] — "
+        f"{saved.type_local or '?'} {saved.surface or '?'} m², "
+        f"{saved.price_asked:,.0f} €".replace(",", " ")
+        if saved.price_asked else
+        f"[green]Listing #{saved.id} ajouté[/]"
+    )
+
+
+@listings_app.command("list")
+def listings_list_cmd(
+    commune: str | None = typer.Option(None, "--commune", "-c", help="Filter by commune."),
+    condition: str | None = typer.Option(None, "--condition", help="Filter by condition."),
+    source: str | None = typer.Option(None, "--source", help="Filter by platform."),
+    matched: bool = typer.Option(False, "--matched", help="Only show DVF-matched listings."),
+    unmatched: bool = typer.Option(False, "--unmatched", help="Only show unmatched listings."),
+    limit: int = typer.Option(50, "--limit", "-n", help="Max results."),
+) -> None:
+    """List captured listings."""
+    results = list_listings(
+        commune=commune, condition=condition, source=source,
+        matched_only=matched, unmatched_only=unmatched, limit=limit,
+    )
+    if not results:
+        console.print("[yellow]Aucune annonce trouvée.[/]")
+        return
+
+    tbl = Table(title=f"Annonces ({len(results)})")
+    tbl.add_column("#", justify="right")
+    tbl.add_column("Source")
+    tbl.add_column("Type")
+    tbl.add_column("Surface", justify="right")
+    tbl.add_column("Prix", justify="right")
+    tbl.add_column("État")
+    tbl.add_column("Commune")
+    tbl.add_column("Adresse")
+    tbl.add_column("DVF match")
+    tbl.add_column("Vu le")
+
+    def fmt_eur(v: float | None) -> str:
+        return f"{v:,.0f} €".replace(",", " ") if v is not None else "-"
+
+    for l in results:  # noqa: E741
+        tbl.add_row(
+            str(l.id),
+            l.source or "-",
+            l.type_local or "-",
+            f"{l.surface:.0f} m²" if l.surface else "-",
+            fmt_eur(l.price_asked),
+            (l.condition or "?").replace("_", " "),
+            l.commune or "-",
+            (l.adresse_approx or "-")[:35],
+            l.matched_mutation_id or "-",
+            (l.first_seen or "")[:10],
+        )
+    console.print(tbl)
+
+
+@listings_app.command("show")
+def listings_show_cmd(
+    listing_id: int = typer.Argument(..., help="Listing ID."),
+) -> None:
+    """Show detailed information about a listing."""
+    l = get_listing(listing_id)  # noqa: E741
+    if l is None:
+        console.print(f"[red]Annonce #{listing_id} introuvable.[/]")
+        raise typer.Exit(code=1)
+
+    tbl = Table(title=f"Annonce #{l.id}", show_header=False)
+    tbl.add_column("Field")
+    tbl.add_column("Value")
+
+    if l.title:
+        tbl.add_row("Titre", l.title)
+    tbl.add_row("Source", l.source or "-")
+    if l.url:
+        tbl.add_row("URL", l.url)
+    if l.type_local:
+        tbl.add_row("Type", l.type_local)
+    if l.surface:
+        tbl.add_row("Surface", f"{l.surface:.0f} m²")
+    if l.rooms:
+        tbl.add_row("Pièces", str(l.rooms))
+    if l.price_asked:
+        tbl.add_row("Prix demandé", f"{l.price_asked:,.0f} €".replace(",", " "))
+    if l.condition:
+        conf = f" ({l.condition_confidence:.0%})" if l.condition_confidence else ""
+        tbl.add_row("État", f"{l.condition.replace('_', ' ')}{conf} [{l.condition_source}]")
+    if l.condition_rationale:
+        tbl.add_row("Rationale", l.condition_rationale)
+    if l.commune:
+        tbl.add_row("Commune", l.commune)
+    if l.adresse_approx:
+        tbl.add_row("Adresse", l.adresse_approx)
+    if l.lat is not None and l.lon is not None:
+        tbl.add_row("Coordonnées", f"{l.lat:.5f}, {l.lon:.5f}")
+    if l.matched_mutation_id:
+        tbl.add_row("DVF match", f"{l.matched_mutation_id} (score {l.match_score:.2f})")
+    tbl.add_row("Premier vu", l.first_seen or "-")
+    tbl.add_row("Dernier vu", l.last_seen or "-")
+    if l.disappeared_at:
+        tbl.add_row("Disparu le", l.disappeared_at)
+    if l.description:
+        desc = l.description[:300] + ("..." if len(l.description) > 300 else "")
+        tbl.add_row("Description", desc)
+    if l.notes:
+        tbl.add_row("Notes", l.notes)
+    tbl.add_row("Créé le", l.created_at or "-")
+    tbl.add_row("Mis à jour", l.updated_at or "-")
+    console.print(tbl)
+
+
+@listings_app.command("delete")
+def listings_delete_cmd(
+    listing_id: int = typer.Argument(..., help="Listing ID to delete."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation."),
+) -> None:
+    """Delete a captured listing."""
+    l = get_listing(listing_id)  # noqa: E741
+    if l is None:
+        console.print(f"[red]Annonce #{listing_id} introuvable.[/]")
+        raise typer.Exit(code=1)
+
+    if not yes:
+        console.print(
+            f"Supprimer l'annonce #{listing_id} ({l.type_local or '?'}, "
+            f"{l.adresse_approx or l.title or '?'}) ?"
+        )
+        confirm = typer.confirm("Confirmer ?")
+        if not confirm:
+            console.print("[dim]Annulé.[/]")
+            return
+
+    if delete_listing(listing_id):
+        console.print(f"[green]Annonce #{listing_id} supprimée.[/]")
+    else:
+        console.print(f"[red]Échec de la suppression de #{listing_id}.[/]")
 
 
 @app.command("info")

@@ -146,3 +146,54 @@ CREATE TABLE IF NOT EXISTS property_notes (
 
 CREATE INDEX IF NOT EXISTS idx_property_notes_mutation ON property_notes (id_mutation);
 CREATE INDEX IF NOT EXISTS idx_property_notes_commune  ON property_notes (commune);
+
+-- User-captured real-estate listings (LBC, SeLoger, PAP, etc.).
+-- Each row represents a listing the user personally consulted and fed into
+-- the system. The tool NEVER scrapes — this is user-initiated capture only.
+CREATE TABLE IF NOT EXISTS listings (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    -- Source metadata
+    source                 TEXT,               -- leboncoin / seloger / pap / autre
+    url                    TEXT,
+    title                  TEXT,
+    description            TEXT,
+
+    -- Structured fields
+    price_asked            REAL,               -- asking price (EUR)
+    surface                REAL,               -- m²
+    rooms                  INTEGER,
+    type_local             TEXT,               -- Maison / Appartement
+
+    -- Location
+    commune                TEXT,               -- INSEE code (zero-padded)
+    adresse_approx         TEXT,               -- free-form address as shown in listing
+    lat                    REAL,
+    lon                    REAL,
+
+    -- Condition (detected or manual)
+    condition              TEXT,               -- brut / a_renover / partiel / renove / inconnu
+    condition_source       TEXT,               -- manual / keywords / vision
+    condition_confidence   REAL,               -- 0..1 (1 = manual or certain)
+    condition_rationale    TEXT,               -- short explanation of why this condition
+
+    -- Temporal tracking
+    first_seen             TEXT,               -- when user first saw this listing
+    last_seen              TEXT,               -- last time user checked it was still live
+    disappeared_at         TEXT,               -- when the listing was no longer online
+
+    -- DVF matching (populated by Phase C matcher)
+    matched_mutation_id    TEXT,               -- FK to dvf_transactions.id_mutation
+    match_score            REAL,               -- 0..1 confidence of the match
+
+    -- Archive
+    raw_html               TEXT,               -- optional saved HTML for re-parsing
+
+    notes                  TEXT,
+    created_at             TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at             TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_listings_commune   ON listings (commune);
+CREATE INDEX IF NOT EXISTS idx_listings_matched   ON listings (matched_mutation_id);
+CREATE INDEX IF NOT EXISTS idx_listings_condition ON listings (condition);

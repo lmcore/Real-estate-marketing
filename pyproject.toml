@@ -42,7 +42,7 @@ target-version = "py310"
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 # RUF001/002/003 flag French typography (×, –, €) as "ambiguous" — noise for a
 # French-language project. We keep the rest of RUF enabled.
-ignore = ["E501", "RUF001", "RUF002", "RUF003"]
+ignore = ["E501", "B008", "RUF001", "RUF002", "RUF003"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
