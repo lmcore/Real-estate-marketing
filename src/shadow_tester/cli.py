@@ -1560,6 +1560,22 @@ def forecaster_delete(
     console.print(f"[green]Forecast #{forecast_id} supprim\u00e9.[/]")
 
 
+@app.command("dashboard")
+def dashboard(
+    port: int = typer.Option(8501, "--port", help="Streamlit server port."),
+) -> None:
+    """Launch the Streamlit dashboard."""
+    import subprocess
+    import sys
+
+    app_path = Path(__file__).resolve().parent / "dashboard" / "app.py"
+    console.print(f"[green]Starting dashboard[/] on port {port}\u2026")
+    subprocess.run(
+        [sys.executable, "-m", "streamlit", "run", str(app_path), "--server.port", str(port)],
+        check=False,
+    )
+
+
 @app.command("info")
 def info() -> None:
     """Show resolved configuration (paths, URLs)."""

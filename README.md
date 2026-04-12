@@ -35,7 +35,7 @@ qu'un signal bruité et artificiel.
 | `notes` — annotations état du bien (condition, travaux) | ✅ v1 |
 | `listings` — capture d'annonces, matching DVF, stats par état | ✅ v1 |
 | `forecaster` — marge après travaux (marchand de biens) | ✅ v1 |
-| `dashboard` — Streamlit | ⏳ à venir |
+| `dashboard` — Streamlit (4 pages : marché, comps, annonces, forecaster) | ✅ v1 |
 
 ## Installation
 
@@ -159,6 +159,10 @@ shadow-tester forecaster show 1
 
 #     — supprimer un forecast
 shadow-tester forecaster delete 1
+
+# 13. Dashboard Streamlit (interface visuelle complète)
+shadow-tester dashboard
+shadow-tester dashboard --port 8502
 ```
 
 Exemple de sortie `summary` :
@@ -327,6 +331,21 @@ du ROI et de la confiance (nombre de comps).
 
 Les forecasts sont sauvegardés en base pour comparer les scénarios.
 
+### Dashboard Streamlit (`shadow-tester dashboard`)
+
+Interface visuelle complète avec 4 pages :
+
+1. **Marché** — indicateurs INSEE (population, densité, revenus, vacance) +
+   tableau DVF par type/année + graphique d'évolution des prix/m²
+2. **Comparables** — formulaire interactif de recherche (type, surface, pièces,
+   budget, terrain, rayon, ancienneté) + tableau détaillé + fourchette + verdict
+3. **Annonces** — onglet stats par condition (négo, délai, €/m² par état) +
+   onglet liste des annonces capturées avec statut de matching DVF
+4. **Forecaster** — calculateur de marge interactif (paramètres MDB) +
+   tableau des scénarios sauvegardés
+
+Lancement : `shadow-tester dashboard` (port par défaut : 8501).
+
 ## Structure
 
 ```
@@ -365,6 +384,10 @@ src/shadow_tester/
 │   ├── models.py       # ForecastParams, ForecastResult (dataclasses)
 │   ├── engine.py       # calculate_forecast (comps + coûts MDB → marge)
 │   └── repo.py         # CRUD SQLite (save, list, get, delete)
+├── dashboard/
+│   ├── app.py          # Streamlit entry point (routing, sidebar)
+│   ├── helpers.py      # Formatage EUR/% + labels condition + couleurs ROI
+│   └── pages/          # 4 pages : market, comps, listings, forecaster
 └── storage/
     ├── db.py           # Connexion SQLite
     └── schema.sql      # Schéma des tables
