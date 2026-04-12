@@ -36,6 +36,7 @@ from shadow_tester.listings.matcher import (
     match_listing,
 )
 from shadow_tester.listings.repo import update_listing as _update_listing
+from shadow_tester.listings.stats import compute_listing_stats
 from shadow_tester.notes import (
     ALLOWED_CONDITIONS,
     ALLOWED_SOURCES,
@@ -1085,6 +1086,104 @@ def listings_match_cmd(
     console.print(
         f"[bold]Résultat:[/] {applied} match(es) appliqué(s), {skipped} ignoré(s)."
     )
+
+
+@listings_app.command("stats")
+def listings_stats_cmd(
+    commune: str | None = typer.Option(None, "--commune", "-c", help="Filter by commune."),
+    type_local: str | None = typer.Option(
+        None, "--type", "-t", help="Filter: 'Maison' or 'Appartement'.",
+    ),
+) -> None:
+    """Show aggregate listing stats by property condition.
+
+    Displays count, median asking price, €/m², negotiation margin,
+    and time-on-market for each condition bucket (brut, à rénover,
+    partiel, rénové, inconnu).
+    """
+    stats = compute_listing_stats(commune=commune, type_local=type_local)
+
+    if stats.total_listings == 0:
+        console.print("[yellow]Aucune annonce trouvée.[/]")
+        return
+
+    title = "Statistiques par état"
+    if commune:
+        title += f" — commune {commune}"
+    if type_local:
+        title += f" — {type_local}"
+    title += f" ({stats.total_listings} annonces, {stats.total_matched} matchées DVF)"
+
+    def fmt_eur(v: float | None) -> str:
+        return f"{v:,.0f} €".replace(",", " ") if v is not None else "-"
+
+    def fmt_pct(v: float | None) -> str:
+        if v is None:
+            return "-"
+        color = "green" if v < 0 else "red"
+        return f"[{color}]{v:+.1f}%[/{color}]"
+
+    def fmt_days(v: int | None) -> str:
+        if v is None:
+            return "-"
+        return f"{v}j"
+
+    _CONDITION_LABELS = {
+        "brut": "Brut",
+        "a_renover": "À rénover",
+        "partiel": "Partiel",
+        "renove": "Rénové",
+        "inconnu": "Inconnu",
+    }
+
+    tbl = Table(title=title)
+    tbl.add_column("État")
+    tbl.add_column("N", justify="right")
+    tbl.add_column("Matchées", justify="right")
+    tbl.add_column("Prix demandé\n(médian)", justify="right")
+    tbl.add_column("€/m² demandé\n(médian)", justify="right")
+    tbl.add_column("€/m² vendu\n(médian)", justify="right")
+    tbl.add_column("Négo\n(médian)", justify="right")
+    tbl.add_column("Délai\n(médian)", justify="right")
+
+    _CONDITION_COLORS = {
+        "brut": "red",
+        "a_renover": "dark_orange",
+        "partiel": "yellow",
+        "renove": "green",
+    }
+
+    for b in stats.buckets:
+        label = _CONDITION_LABELS.get(b.condition, b.condition)
+        color = _CONDITION_COLORS.get(b.condition, "dim")
+        tbl.add_row(
+            f"[{color}]{label}[/{color}]",
+            str(b.count),
+            str(b.matched_count),
+            fmt_eur(b.median_price_asked),
+            fmt_eur(b.median_prix_m2_asked),
+            fmt_eur(b.median_prix_m2_sold),
+            fmt_pct(b.median_price_delta_pct),
+            fmt_days(b.median_days_to_sale),
+        )
+    console.print(tbl)
+
+    # Summary insight.
+    matched_buckets = [b for b in stats.buckets if b.matched_count >= 2]
+    if len(matched_buckets) >= 2:
+        by_delta = sorted(
+            matched_buckets,
+            key=lambda b: b.median_price_delta_pct or 0,
+        )
+        best = by_delta[0]
+        worst = by_delta[-1]
+        if best.median_price_delta_pct is not None and worst.median_price_delta_pct is not None:
+            console.print(
+                f"\n[bold]Insight:[/] Les biens [green]{_CONDITION_LABELS.get(best.condition, best.condition)}[/green] "
+                f"se négocient à {best.median_price_delta_pct:+.1f}% vs demandé, "
+                f"contre {worst.median_price_delta_pct:+.1f}% pour les "
+                f"[red]{_CONDITION_LABELS.get(worst.condition, worst.condition)}[/red]."
+            )
 
 
 @app.command("info")

@@ -33,7 +33,7 @@ qu'un signal bruité et artificiel.
 | `insee` — indicateurs communaux + affordability | ✅ v1 |
 | `comps` — biens comparables + géocodage BAN | ✅ v1 |
 | `notes` — annotations état du bien (condition, travaux) | ✅ v1 |
-| `listings` — capture d'annonces + matching DVF | ⏳ à venir |
+| `listings` — capture d'annonces, matching DVF, stats par état | ✅ v1 |
 | `dashboard` — Streamlit | ⏳ à venir |
 | `forecaster` — marge après travaux | ⏳ à venir |
 
@@ -97,7 +97,10 @@ shadow-tester notes show 1
 shadow-tester notes delete 1
 
 # 8. Capturer une annonce (LBC, SeLoger, PAP…)
-#    — depuis un fichier HTML sauvegardé (condition auto-détectée)
+#    — depuis une URL (fetch + parsing + détection d'état automatique)
+shadow-tester listings add --url https://www.leboncoin.fr/... --commune 04112
+
+#    — depuis un fichier HTML sauvegardé
 shadow-tester listings add --html-file page_lbc.html --commune 04112
 
 #    — saisie manuelle rapide
@@ -113,6 +116,21 @@ shadow-tester listings add --commune 04112 --type Maison --price 320000 \
 # Lister / afficher les annonces capturées
 shadow-tester listings list --commune 04112
 shadow-tester listings show 3
+
+# 9. Matcher les annonces avec les ventes DVF
+#    — retrouver automatiquement la vente DVF correspondante
+shadow-tester listings match --commune 04112
+
+#    — matcher une annonce spécifique
+shadow-tester listings match --id 3
+
+#    — auto-match uniquement (score ≥ 0.80, sans confirmation)
+shadow-tester listings match --auto --yes
+
+# 10. Statistiques par état du bien
+#     — négo, délai, €/m² par condition (brut/à rénover/partiel/rénové)
+shadow-tester listings stats --commune 04112
+shadow-tester listings stats --commune 04112 --type Maison
 ```
 
 Exemple de sortie `summary` :
@@ -191,6 +209,44 @@ Le score de chaque comp est une moyenne pondérée :
 **surface 35% + distance 30% + récence 20% + pièces 15%**. Les poids sont
 volontairement visibles (`scoring.py`) et faciles à tuner.
 
+### Capture d'annonces (`listings add`)
+
+Trois modes de capture, du plus simple au plus détaillé :
+
+1. **URL** (`--url`) : coller l'URL d'une annonce LBC / SeLoger / PAP →
+   fetch automatique, parsing JSON-LD / meta, détection de l'état du bien
+   par mots-clés. Aucun scraping automatisé — une seule requête par appel,
+   déclenchée manuellement.
+2. **Fichier HTML** (`--html-file`) : si la page a déjà été sauvegardée.
+3. **Saisie manuelle** : `--price`, `--surface`, `--rooms`, etc.
+
+Dans tous les cas, la condition du bien (brut / à rénover / partiel / rénové)
+est détectée automatiquement depuis la description via ~40 regex pondérées.
+Un signal ambigu (mots-clés contradictoires) produit "inconnu".
+
+### Matching DVF ↔ annonces (`listings match`)
+
+Le matcher retrouve la vente DVF correspondant à une annonce capturée :
+
+- **Filtres durs** : même commune, même type, surface ±10%, vente dans les
+  12 mois suivant la première vue de l'annonce.
+- **Score pondéré** : prix 35% + surface 25% + pièces 15% + temporal 15% +
+  distance géo 10%. Le score prix utilise une gaussienne centrée à -8%
+  (marge de négociation médiane en France).
+- **Seuils** : auto-match ≥ 0.80 (lien automatique), suggestion ≥ 0.60
+  (confirmation utilisateur).
+
+Une fois matchée, l'annonce enrichit les comps : `comps find` affiche la
+condition du bien issue de l'annonce (en complément des notes manuelles).
+
+### Statistiques par état (`listings stats`)
+
+Agrège les annonces capturées par condition et affiche :
+- Nombre d'annonces et de matches DVF par catégorie
+- Prix demandé médian et €/m²
+- Marge de négociation médiane (DVF vs prix demandé)
+- Délai médian de commercialisation (jours entre première vue et vente DVF)
+
 Les données brutes sont mises en cache dans `data/cache/` et chargées dans
 `data/shadow_tester.sqlite`.
 
@@ -223,6 +279,9 @@ src/shadow_tester/
 │   ├── models.py       # Listing dataclass
 │   ├── condition.py    # Détection état par mots-clés (heuristiques FR)
 │   ├── parsers.py      # Extraction JSON-LD / meta depuis HTML sauvegardé
+│   ├── fetch.py        # Fetch URL (httpx, rate-limited, user-initiated)
+│   ├── matcher.py      # DVF↔listing matching (score pondéré 5 axes)
+│   ├── stats.py        # Stats agrégées par état (négo, délai, €/m²)
 │   └── repo.py         # CRUD SQLite
 └── storage/
     ├── db.py           # Connexion SQLite

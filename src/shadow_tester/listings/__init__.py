@@ -17,15 +17,19 @@ from shadow_tester.listings.repo import (
     list_listings,
     update_listing,
 )
+from shadow_tester.listings.stats import ConditionBucket, ListingStats, compute_listing_stats
 
 __all__ = [
+    "ConditionBucket",
     "ConditionDetection",
     "FetchError",
     "Listing",
+    "ListingStats",
     "MatchCandidate",
     "MatchResult",
     "ParsedListing",
     "add_listing",
+    "compute_listing_stats",
     "delete_listing",
     "detect_condition",
     "fetch_listing_html",

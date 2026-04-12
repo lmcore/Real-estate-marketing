@@ -485,3 +485,106 @@ class TestFindListingsForMutations:
         result = find_listings_for_mutations(["mut-001"])
         # l2 has higher id → wins due to tiebreaker
         assert result["mut-001"].condition == "renove"
+
+
+# ── Listing stats tests ─────────────────────────────────────────────────
+
+
+class TestListingStats:
+    def test_empty_db(self, isolated_db):
+        from shadow_tester.listings.stats import compute_listing_stats
+
+        stats = compute_listing_stats()
+        assert stats.total_listings == 0
+        assert stats.buckets == []
+
+    def test_counts_by_condition(self, isolated_db):
+        from shadow_tester.listings import add_listing
+        from shadow_tester.listings.models import Listing
+        from shadow_tester.listings.stats import compute_listing_stats
+
+        add_listing(Listing(commune="04112", price_asked=200_000, surface=80, condition="renove"))
+        add_listing(Listing(commune="04112", price_asked=180_000, surface=90, condition="a_renover"))
+        add_listing(Listing(commune="04112", price_asked=220_000, surface=85, condition="renove"))
+
+        stats = compute_listing_stats(commune="04112")
+        assert stats.total_listings == 3
+        conds = {b.condition: b for b in stats.buckets}
+        assert conds["renove"].count == 2
+        assert conds["a_renover"].count == 1
+
+    def test_median_asking_price(self, isolated_db):
+        from shadow_tester.listings import add_listing
+        from shadow_tester.listings.models import Listing
+        from shadow_tester.listings.stats import compute_listing_stats
+
+        add_listing(Listing(commune="04112", price_asked=200_000, surface=100, condition="renove"))
+        add_listing(Listing(commune="04112", price_asked=300_000, surface=100, condition="renove"))
+        add_listing(Listing(commune="04112", price_asked=250_000, surface=100, condition="renove"))
+
+        stats = compute_listing_stats(commune="04112")
+        bucket = stats.buckets[0]
+        assert bucket.median_price_asked == pytest.approx(250_000)
+
+    def test_median_prix_m2_asked(self, isolated_db):
+        from shadow_tester.listings import add_listing
+        from shadow_tester.listings.models import Listing
+        from shadow_tester.listings.stats import compute_listing_stats
+
+        add_listing(Listing(commune="04112", price_asked=200_000, surface=100, condition="renove"))
+        add_listing(Listing(commune="04112", price_asked=300_000, surface=100, condition="renove"))
+
+        stats = compute_listing_stats(commune="04112")
+        bucket = stats.buckets[0]
+        # (2000 + 3000) / 2 = 2500
+        assert bucket.median_prix_m2_asked == pytest.approx(2500)
+
+    def test_matched_stats_with_dvf(self, isolated_db):
+        """Matched listings should produce negotiation margin and delay stats."""
+        _seed_dvf()
+
+        from shadow_tester.listings import add_listing
+        from shadow_tester.listings.models import Listing
+        from shadow_tester.listings.repo import update_listing
+        from shadow_tester.listings.stats import compute_listing_stats
+
+        l1 = add_listing(Listing(
+            commune="04112", price_asked=270_000, surface=100,
+            type_local="Maison", condition="a_renover",
+            first_seen="2024-03-01",
+        ))
+        update_listing(l1.id, matched_mutation_id="mut-001", match_score=0.85)
+
+        stats = compute_listing_stats(commune="04112")
+        bucket = next(b for b in stats.buckets if b.condition == "a_renover")
+        assert bucket.matched_count == 1
+        assert stats.total_matched == 1
+        # DVF 250k vs asked 270k → delta ≈ -7.4%
+        assert bucket.median_price_delta_pct is not None
+        assert bucket.median_price_delta_pct == pytest.approx(-7.4, abs=0.1)
+        # 2024-03-01 → 2024-06-15 = 106 days
+        assert bucket.median_days_to_sale == 106
+        # DVF 250k / 100m² = 2500 €/m²
+        assert bucket.median_prix_m2_sold == pytest.approx(2500)
+
+    def test_filter_by_type(self, isolated_db):
+        from shadow_tester.listings import add_listing
+        from shadow_tester.listings.models import Listing
+        from shadow_tester.listings.stats import compute_listing_stats
+
+        add_listing(Listing(commune="04112", price_asked=200_000, type_local="Maison", condition="renove"))
+        add_listing(Listing(commune="04112", price_asked=150_000, type_local="Appartement", condition="renove"))
+
+        stats = compute_listing_stats(commune="04112", type_local="Maison")
+        assert stats.total_listings == 1
+
+    def test_no_condition_defaults_to_inconnu(self, isolated_db):
+        from shadow_tester.listings import add_listing
+        from shadow_tester.listings.models import Listing
+        from shadow_tester.listings.stats import compute_listing_stats
+
+        add_listing(Listing(commune="04112", price_asked=200_000))
+
+        stats = compute_listing_stats(commune="04112")
+        assert stats.buckets[0].condition == "inconnu"
+        assert stats.buckets[0].count == 1
