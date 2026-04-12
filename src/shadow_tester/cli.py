@@ -28,6 +28,14 @@ from shadow_tester.listings import (
     list_listings,
     parse_listing_html,
 )
+from shadow_tester.listings.fetch import FetchError, fetch_listing_html
+from shadow_tester.listings.matcher import (
+    AUTO_MATCH_THRESHOLD,
+    SUGGEST_THRESHOLD,
+    match_all_unmatched,
+    match_listing,
+)
+from shadow_tester.listings.repo import update_listing as _update_listing
 from shadow_tester.notes import (
     ALLOWED_CONDITIONS,
     ALLOWED_SOURCES,
@@ -670,6 +678,10 @@ def notes_delete(
 
 @listings_app.command("add")
 def listings_add_cmd(
+    url: str | None = typer.Option(
+        None, "--url", "-u",
+        help="Listing URL — the page will be fetched and parsed automatically.",
+    ),
     html_file: Path | None = typer.Option(
         None, "--html-file", "-f",
         help="Path to a saved HTML file to parse (LBC, SeLoger, etc.).",
@@ -689,17 +701,50 @@ def listings_add_cmd(
     source_name: str | None = typer.Option(
         None, "--source", help="Platform name (leboncoin/seloger/pap/autre).",
     ),
-    url: str | None = typer.Option(None, "--url", help="Listing URL (for reference)."),
     title: str | None = typer.Option(None, "--title", help="Listing title."),
     description: str | None = typer.Option(None, "--description", "-d", help="Listing description text."),
     note: str | None = typer.Option(None, "--note", "-n", help="Free-form observation."),
 ) -> None:
-    """Capture a listing from a saved HTML file or manual fields."""
+    """Capture a listing from a URL, saved HTML file, or manual fields.
+
+    The simplest usage is just: listings add --url <paste-url> --commune 04112
+    """
     parsed_html_source: str | None = None
     parsed_description: str | None = None
     raw_html: str | None = None
+    parsed_lat: float | None = None
+    parsed_lon: float | None = None
 
-    if html_file is not None:
+    # Mode 1: URL fetch — the simplest path.
+    if url is not None and html_file is None:
+        console.print(f"[cyan]Fetching[/] {url} ...")
+        try:
+            raw_html = fetch_listing_html(url)
+        except FetchError as exc:
+            console.print(f"[red]Fetch failed:[/] {exc}")
+            console.print(
+                "[dim]Tip: save the page as HTML and use --html-file instead.[/]"
+            )
+            raise typer.Exit(code=2) from exc
+        parsed = parse_listing_html(raw_html)
+        console.print(
+            f"[green]Parsed[/] title={parsed.title!r}, price={parsed.price}, "
+            f"surface={parsed.surface}, rooms={parsed.rooms}, "
+            f"type={parsed.type_local}, source={parsed.source}"
+        )
+        price = price or parsed.price
+        surface = surface or parsed.surface
+        rooms = rooms if rooms is not None else parsed.rooms
+        type_local = type_local or parsed.type_local
+        address = address or parsed.address
+        title = title or parsed.title
+        parsed_description = parsed.description
+        parsed_html_source = parsed.source
+        parsed_lat = parsed.lat
+        parsed_lon = parsed.lon
+
+    # Mode 2: local HTML file.
+    elif html_file is not None:
         if not html_file.exists():
             console.print(f"[red]File not found:[/] {html_file}")
             raise typer.Exit(code=1)
@@ -711,7 +756,6 @@ def listings_add_cmd(
             f"surface={parsed.surface}, rooms={parsed.rooms}, "
             f"type={parsed.type_local}, source={parsed.source}"
         )
-        # Populate from parsed, but CLI flags override.
         price = price or parsed.price
         surface = surface or parsed.surface
         rooms = rooms if rooms is not None else parsed.rooms
@@ -720,12 +764,13 @@ def listings_add_cmd(
         title = title or parsed.title
         parsed_description = parsed.description
         parsed_html_source = parsed.source
-        if parsed.lat and not (url or address):
-            lat, lon = parsed.lat, parsed.lon
-        else:
-            lat, lon = None, None
-    else:
-        lat, lon = None, None
+        parsed_lat = parsed.lat
+        parsed_lon = parsed.lon
+
+    # Mode 3: fully manual — no parsing needed.
+
+    lat = parsed_lat
+    lon = parsed_lon
 
     final_description = description or parsed_description
     final_source = source_name or parsed_html_source or "autre"
@@ -911,6 +956,135 @@ def listings_delete_cmd(
         console.print(f"[green]Annonce #{listing_id} supprimée.[/]")
     else:
         console.print(f"[red]Échec de la suppression de #{listing_id}.[/]")
+
+
+@listings_app.command("match")
+def listings_match_cmd(
+    commune: str | None = typer.Option(None, "--commune", "-c", help="Limit matching to this commune."),
+    listing_id: int | None = typer.Option(None, "--id", help="Match a single listing by ID."),
+    auto_only: bool = typer.Option(
+        False, "--auto", help="Only apply auto-matches (score ≥ 0.80), skip review.",
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Accept all suggested matches without prompting."),
+) -> None:
+    """Match unmatched listings against DVF transactions.
+
+    Without --id, runs on all unmatched listings (optionally filtered by commune).
+    Shows candidates and lets you confirm or skip each suggested match.
+    """
+    if listing_id is not None:
+        # Single-listing mode.
+        lst = get_listing(listing_id)
+        if lst is None:
+            console.print(f"[red]Annonce #{listing_id} introuvable.[/]")
+            raise typer.Exit(code=1)
+        if lst.matched_mutation_id:
+            console.print(
+                f"[yellow]Annonce #{listing_id} déjà matchée[/] → {lst.matched_mutation_id} "
+                f"(score {lst.match_score:.2f})"
+            )
+            return
+        results = [match_listing(lst)]
+    else:
+        console.print("[cyan]Recherche de matches DVF[/] pour les annonces non matchées…")
+        results = match_all_unmatched(commune=commune)
+
+    if not results:
+        console.print("[yellow]Aucun match trouvé.[/]")
+        return
+
+    applied = 0
+    skipped = 0
+
+    for mr in results:
+        if mr.best is None:
+            continue
+
+        best = mr.best
+        lst = get_listing(mr.listing_id)
+        if lst is None:
+            continue
+
+        # Display the match.
+        console.print()
+        console.print(
+            f"[bold]Annonce #{mr.listing_id}[/] — "
+            f"{lst.type_local or '?'} {lst.surface or '?'} m², "
+            + (f"{lst.price_asked:,.0f} €".replace(",", " ") if lst.price_asked else "prix ?")
+            + f" ({lst.commune or '?'})"
+        )
+
+        tbl = Table(title=f"{len(mr.candidates)} candidat(s) DVF")
+        tbl.add_column("Score", justify="right")
+        tbl.add_column("Date")
+        tbl.add_column("Prix DVF", justify="right")
+        tbl.add_column("Surface", justify="right")
+        tbl.add_column("Δ prix", justify="right")
+        tbl.add_column("Délai", justify="right")
+        tbl.add_column("Mutation")
+
+        def fmt_eur(v: float | None) -> str:
+            return f"{v:,.0f} €".replace(",", " ") if v is not None else "-"
+
+        for i, cand in enumerate(mr.candidates[:5]):
+            score_color = "green" if cand.score >= AUTO_MATCH_THRESHOLD else (
+                "yellow" if cand.score >= SUGGEST_THRESHOLD else "dim"
+            )
+            delta = f"{cand.price_delta_pct:+.1f}%" if cand.price_delta_pct is not None else "-"
+            days = f"{cand.days_to_sale}j" if cand.days_to_sale is not None else "-"
+            marker = " ★" if i == 0 else ""
+            tbl.add_row(
+                f"[{score_color}]{cand.score:.2f}{marker}[/{score_color}]",
+                cand.date_mutation,
+                fmt_eur(cand.valeur_fonciere),
+                f"{cand.surface:.0f} m²",
+                delta,
+                days,
+                cand.id_mutation[:20],
+            )
+        console.print(tbl)
+
+        # Decision logic.
+        if mr.auto_matched:
+            console.print(
+                f"[green]Auto-match[/] score={best.score:.2f} ≥ {AUTO_MATCH_THRESHOLD}"
+            )
+            if yes or auto_only:
+                accept = True
+            else:
+                accept = typer.confirm("Accepter ce match ?", default=True)
+        elif auto_only:
+            console.print(f"[dim]Score {best.score:.2f} < {AUTO_MATCH_THRESHOLD} — ignoré (--auto)[/]")
+            skipped += 1
+            continue
+        else:
+            console.print(
+                f"[yellow]Match suggéré[/] score={best.score:.2f} "
+                f"(seuil auto={AUTO_MATCH_THRESHOLD})"
+            )
+            accept = True if yes else typer.confirm("Accepter ce match ?", default=False)
+
+        if accept:
+            _update_listing(
+                mr.listing_id,
+                matched_mutation_id=best.id_mutation,
+                match_score=best.score,
+            )
+            console.print(
+                f"  [green]✓[/] Annonce #{mr.listing_id} → {best.id_mutation} "
+                f"(Δ prix {best.price_delta_pct:+.1f}%, délai {best.days_to_sale}j)"
+                if best.price_delta_pct is not None and best.days_to_sale is not None
+                else f"  [green]✓[/] Annonce #{mr.listing_id} → {best.id_mutation}"
+            )
+            applied += 1
+        else:
+            skipped += 1
+            console.print("  [dim]Ignoré.[/]")
+
+    console.print()
+    console.print(
+        f"[bold]Résultat:[/] {applied} match(es) appliqué(s), {skipped} ignoré(s)."
+    )
 
 
 @app.command("info")

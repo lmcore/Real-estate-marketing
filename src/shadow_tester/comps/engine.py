@@ -13,6 +13,7 @@ from collections.abc import Iterable
 
 from shadow_tester.comps.models import Comp, CompResult, Target
 from shadow_tester.comps.scoring import score_comp
+from shadow_tester.listings.repo import find_listings_for_mutations
 from shadow_tester.notes.repo import find_notes_for_mutations
 from shadow_tester.storage import connect
 
@@ -169,13 +170,24 @@ def find_comparables(target: Target) -> CompResult:
     )
     top = candidates[: target.limit]
 
-    # Enrich with condition from user notes (ground truth layer).
+    # Enrich with condition from user notes (ground truth, highest priority).
     notes_map = find_notes_for_mutations(c.id_mutation for c in top)
     for comp in top:
         note = notes_map.get(comp.id_mutation)
         if note is not None:
             comp.condition = note.condition
             comp.condition_source = note.source
+
+    # Second pass: fill gaps from matched listings (lower priority than notes).
+    missing = [c.id_mutation for c in top if c.condition is None]
+    if missing:
+        listings_map = find_listings_for_mutations(missing)
+        for comp in top:
+            if comp.condition is None:
+                matched = listings_map.get(comp.id_mutation)
+                if matched is not None and matched.condition:
+                    comp.condition = matched.condition
+                    comp.condition_source = f"listing#{matched.id}"
 
     p25, median, p75 = _aggregate(target, top)
 

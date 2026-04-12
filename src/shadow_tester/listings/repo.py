@@ -146,6 +146,35 @@ def update_listing(listing_id: int, **fields: object) -> Listing | None:
     return _row_to_listing(row) if row else None
 
 
+def find_listings_for_mutations(
+    mutation_ids: list[str] | set[str],
+) -> dict[str, Listing]:
+    """Return matched listings keyed by mutation ID.
+
+    When a mutation has multiple matching listings, the most recently
+    updated one wins (same tie-breaking logic as notes).
+    """
+    ids = list(set(mutation_ids))
+    if not ids:
+        return {}
+
+    placeholders = ", ".join("?" for _ in ids)
+    sql = (
+        f"SELECT * FROM listings "
+        f"WHERE matched_mutation_id IN ({placeholders}) "
+        f"ORDER BY datetime(updated_at) DESC, id DESC"
+    )
+    with connect() as conn:
+        rows = conn.execute(sql, ids).fetchall()
+
+    result: dict[str, Listing] = {}
+    for row in rows:
+        mid = row["matched_mutation_id"]
+        if mid not in result:
+            result[mid] = _row_to_listing(row)
+    return result
+
+
 def find_listings_for_commune(
     commune: str,
     *,
