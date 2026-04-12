@@ -86,6 +86,92 @@ def _seed(db_path):
         conn.executemany(_INSERT_SQL, records)
 
 
+_INSERT_TERRAIN_SQL = """
+INSERT OR REPLACE INTO dvf_transactions (
+    id_mutation, disposition, row_idx,
+    date_mutation, nature_mutation, valeur_fonciere,
+    code_postal, code_commune, nom_commune, code_departement,
+    type_local, surface_reelle_bati, nombre_pieces_principales, surface_terrain,
+    adresse_numero, adresse_nom_voie, id_parcelle,
+    longitude, latitude,
+    prix_m2, year
+) VALUES (
+    :id_mutation, 1, 0,
+    :date_mutation, 'Vente', :valeur_fonciere,
+    '04100', '04112', 'Manosque', '04',
+    :type_local, :surface, :rooms, :surface_terrain,
+    :num, :voie, NULL,
+    :lon, :lat,
+    :prix_m2, :year
+)
+"""
+
+
+def _seed_with_terrain(db_path):
+    """Seed with terrain data for Maison rows."""
+    from shadow_tester.storage import connect
+
+    rows = [
+        {"id_mutation": "mt1", "date_mutation": "2024-03-10", "valeur_fonciere": 270_000,
+         "type_local": "Maison", "surface": 100, "rooms": 4, "surface_terrain": 500,
+         "num": "12", "voie": "RUE DES ALPES", "prix_m2": 2700, "year": 2024,
+         "lat": 43.830, "lon": 5.784},
+        {"id_mutation": "mt2", "date_mutation": "2024-05-18", "valeur_fonciere": 350_000,
+         "type_local": "Maison", "surface": 110, "rooms": 5, "surface_terrain": 1200,
+         "num": "24", "voie": "RUE DES ALPES", "prix_m2": 3182, "year": 2024,
+         "lat": 43.831, "lon": 5.785},
+        {"id_mutation": "mt3", "date_mutation": "2024-07-01", "valeur_fonciere": 250_000,
+         "type_local": "Maison", "surface": 95, "rooms": 4, "surface_terrain": 200,
+         "num": "8", "voie": "AV JEAN GIONO", "prix_m2": 2632, "year": 2024,
+         "lat": 43.831, "lon": 5.790},
+        {"id_mutation": "mt4", "date_mutation": "2023-09-15", "valeur_fonciere": 290_000,
+         "type_local": "Maison", "surface": 105, "rooms": 4, "surface_terrain": 550,
+         "num": "3", "voie": "CHEMIN DE LA THOMASSINE", "prix_m2": 2762, "year": 2023,
+         "lat": 43.841, "lon": 5.765},
+        {"id_mutation": "mt5", "date_mutation": "2024-01-20", "valeur_fonciere": 280_000,
+         "type_local": "Maison", "surface": 100, "rooms": 4, "surface_terrain": 480,
+         "num": "15", "voie": "RUE DES ALPES", "prix_m2": 2800, "year": 2024,
+         "lat": 43.830, "lon": 5.784},
+    ]
+    with connect() as conn:
+        conn.executemany(_INSERT_TERRAIN_SQL, rows)
+
+
+def _seed_with_outlier(db_path):
+    """Seed with normal transactions + one outlier (family sale at 100 €/m²)."""
+    from shadow_tester.storage import connect
+
+    rows = [
+        {"id_mutation": "mn1", "date_mutation": "2024-03-10", "valeur_fonciere": 270_000,
+         "type_local": "Maison", "surface": 100, "rooms": 4, "surface_terrain": None,
+         "num": "12", "voie": "RUE DES ALPES", "prix_m2": 2700, "year": 2024,
+         "lat": 43.830, "lon": 5.784},
+        {"id_mutation": "mn2", "date_mutation": "2024-05-18", "valeur_fonciere": 295_000,
+         "type_local": "Maison", "surface": 110, "rooms": 5, "surface_terrain": None,
+         "num": "24", "voie": "RUE DES ALPES", "prix_m2": 2682, "year": 2024,
+         "lat": 43.831, "lon": 5.785},
+        {"id_mutation": "mn3", "date_mutation": "2024-07-01", "valeur_fonciere": 250_000,
+         "type_local": "Maison", "surface": 95, "rooms": 4, "surface_terrain": None,
+         "num": "8", "voie": "AV JEAN GIONO", "prix_m2": 2632, "year": 2024,
+         "lat": 43.831, "lon": 5.790},
+        {"id_mutation": "mn4", "date_mutation": "2023-09-15", "valeur_fonciere": 260_000,
+         "type_local": "Maison", "surface": 105, "rooms": 4, "surface_terrain": None,
+         "num": "3", "voie": "CHEMIN DE LA THOMASSINE", "prix_m2": 2476, "year": 2023,
+         "lat": 43.841, "lon": 5.765},
+        {"id_mutation": "mn5", "date_mutation": "2024-01-20", "valeur_fonciere": 280_000,
+         "type_local": "Maison", "surface": 100, "rooms": 4, "surface_terrain": None,
+         "num": "15", "voie": "RUE DES ALPES", "prix_m2": 2800, "year": 2024,
+         "lat": 43.830, "lon": 5.784},
+        # Outlier: family sale at 10 000€ for a 100m² house → 100 €/m²
+        {"id_mutation": "m-outlier", "date_mutation": "2024-02-15", "valeur_fonciere": 10_000,
+         "type_local": "Maison", "surface": 100, "rooms": 4, "surface_terrain": None,
+         "num": "99", "voie": "RUE DES ALPES", "prix_m2": 100, "year": 2024,
+         "lat": 43.830, "lon": 5.784},
+    ]
+    with connect() as conn:
+        conn.executemany(_INSERT_TERRAIN_SQL, rows)
+
+
 def test_find_comparables_basic(isolated_db):
     from shadow_tester.comps import Target, find_comparables
 
@@ -233,3 +319,43 @@ def test_find_comparables_empty_commune(isolated_db):
     result = find_comparables(target)
     assert result.comps == []
     assert result.median_prix_m2 is None
+
+
+def test_find_comparables_with_terrain(isolated_db):
+    """Surface terrain scoring should affect ranking for Maisons."""
+    from shadow_tester.comps import Target, find_comparables
+
+    _seed_with_terrain(isolated_db)
+    target = Target(
+        commune="04112",
+        type_local="Maison",
+        surface=100,
+        surface_terrain=500.0,
+        surface_tol=0.30,
+        max_years_old=5,
+    )
+    result = find_comparables(target)
+    assert result.comps
+    # At least one comp should have terrain_score > 0.
+    has_terrain = [c for c in result.comps if c.terrain_score > 0]
+    assert has_terrain
+
+
+def test_outlier_filter_removes_family_sale(isolated_db):
+    """A transaction at 100 €/m² (family sale) should be filtered out."""
+    from shadow_tester.comps import Target, find_comparables
+
+    _seed_with_outlier(isolated_db)
+    target = Target(
+        commune="04112",
+        type_local="Maison",
+        surface=100,
+        surface_tol=0.50,
+        max_years_old=5,
+    )
+    result = find_comparables(target)
+    ids = [c.id_mutation for c in result.comps]
+    # The outlier (m-outlier at 100 €/m²) should be filtered.
+    assert "m-outlier" not in ids
+    # Normal transactions should remain.
+    assert len(result.comps) >= 3

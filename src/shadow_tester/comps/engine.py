@@ -25,6 +25,7 @@ SELECT
     id_mutation, date_mutation, year, type_local,
     surface_reelle_bati AS surface,
     nombre_pieces_principales AS rooms,
+    surface_terrain,
     valeur_fonciere, prix_m2,
     COALESCE(
         NULLIF(
@@ -104,6 +105,11 @@ def _fetch_candidates(target: Target, min_year: int) -> list[Comp]:
                 adresse=row["adresse"],
                 lat=float(row["lat"]) if row["lat"] is not None else None,
                 lon=float(row["lon"]) if row["lon"] is not None else None,
+                surface_terrain=(
+                    float(row["surface_terrain"])
+                    if row["surface_terrain"] is not None
+                    else None
+                ),
             )
         )
     return candidates
@@ -139,6 +145,42 @@ def _verdict(target: Target, suggested_low: float, suggested_high: float) -> str
     return "Budget dans la fourchette médiane du marché."
 
 
+def _filter_outliers(candidates: list[Comp]) -> list[Comp]:
+    """Remove prix/m² outliers using Tukey fences (1.5 × IQR).
+
+    This eliminates family sales at far-below-market prices and grouped-lot
+    transactions where prix_m2 is artificially inflated or deflated.
+    Requires at least 5 candidates — with fewer data points, outlier
+    detection is unreliable.
+    """
+    valid = [c for c in candidates if c.prix_m2 is not None]
+    if len(valid) < 5:
+        return candidates  # too few to detect outliers reliably
+
+    prix_m2_sorted = sorted(c.prix_m2 for c in valid)
+    q1 = _percentile(prix_m2_sorted, 0.25)
+    q3 = _percentile(prix_m2_sorted, 0.75)
+    if q1 is None or q3 is None:
+        return candidates
+
+    iqr = q3 - q1
+    fence_low = q1 - 1.5 * iqr
+    fence_high = q3 + 1.5 * iqr
+
+    before = len(candidates)
+    filtered = [
+        c for c in candidates
+        if c.prix_m2 is None or fence_low <= c.prix_m2 <= fence_high
+    ]
+    n_removed = before - len(filtered)
+    if n_removed > 0:
+        logger.info(
+            "Outlier filter: removed %d/%d candidates (fence %.0f–%.0f €/m²)",
+            n_removed, before, fence_low, fence_high,
+        )
+    return filtered
+
+
 def find_comparables(target: Target) -> CompResult:
     """Return the top-``target.limit`` comparable transactions for ``target``."""
     latest_year = _latest_year_in_db(target.commune)
@@ -157,6 +199,9 @@ def find_comparables(target: Target) -> CompResult:
         target.surface_min,
         target.surface_max,
     )
+
+    # Remove outliers (family sales, grouped lots) before scoring.
+    candidates = _filter_outliers(candidates)
 
     for comp in candidates:
         score_comp(comp, target, latest_year=latest_year)

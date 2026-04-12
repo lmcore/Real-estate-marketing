@@ -27,13 +27,27 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return EARTH_RADIUS_KM * c
 
 
-# Scoring weights — sum to 1.0.
-# Tweaked to put real weight on surface and distance while keeping rooms /
-# recency as meaningful secondary signals.
+# ── Scoring weights ──────────────────────────────────────────────────────
+# Default weights (no terrain target): surface 35% + distance 30% + récence 20% + pièces 15%.
+# When a terrain target is set (Maison only): terrain takes 15%, distance drops to 20%,
+# surface drops to 30%. This reflects market reality where lot size has a
+# massive impact on Maison price (a 100m² house on 200m² vs 1500m² is not
+# the same product).
+
 _W_SURFACE = 0.35
 _W_DISTANCE = 0.30
 _W_RECENCY = 0.20
 _W_ROOMS = 0.15
+
+# Weights when terrain scoring is active (Maison + target.surface_terrain set).
+_W_SURFACE_T = 0.30
+_W_DISTANCE_T = 0.20
+_W_RECENCY_T = 0.15
+_W_ROOMS_T = 0.10
+_W_TERRAIN = 0.25  # lot size gets a very significant weight
+
+# Tolerance for terrain matching: ±50% (lots vary a lot more than habitable surface).
+_TERRAIN_TOL = 0.50
 
 
 def _surface_score(target_surface: float, comp_surface: float | None) -> float:
@@ -90,16 +104,49 @@ def _rooms_score(target: Target, comp_rooms: int | None) -> float:
     return 0.0
 
 
+def _terrain_score(target_terrain: float, comp_terrain: float | None) -> float:
+    """Score lot-size similarity for Maison.
+
+    Uses ±50% tolerance (lots vary a lot). Linear decay from 1.0 at exact
+    match to 0.0 at the tolerance edge.
+    """
+    if comp_terrain is None or comp_terrain <= 0:
+        return 0.5  # neutral when data is missing
+    if target_terrain <= 0:
+        return 0.5
+    err = abs(comp_terrain - target_terrain) / target_terrain
+    return max(0.0, 1.0 - err / _TERRAIN_TOL)
+
+
 def score_comp(comp: Comp, target: Target, *, latest_year: int) -> None:
     """Populate ``comp``'s score fields in-place given the ``target``."""
     comp.surface_score = _surface_score(target.surface, comp.surface)
     comp.distance_score, comp.distance_km = _distance_score(target, comp.lat, comp.lon)
     comp.recency_score = _recency_score(target, comp.year, latest_year)
     comp.rooms_score = _rooms_score(target, comp.rooms)
-    comp.total_score = round(
-        _W_SURFACE * comp.surface_score
-        + _W_DISTANCE * comp.distance_score
-        + _W_RECENCY * comp.recency_score
-        + _W_ROOMS * comp.rooms_score,
-        4,
+
+    # Use terrain-aware weights for Maison when the user provides a lot size.
+    use_terrain = (
+        target.type_local == "Maison"
+        and target.surface_terrain is not None
+        and target.surface_terrain > 0
     )
+
+    if use_terrain:
+        comp.terrain_score = _terrain_score(target.surface_terrain, comp.surface_terrain)
+        comp.total_score = round(
+            _W_SURFACE_T * comp.surface_score
+            + _W_DISTANCE_T * comp.distance_score
+            + _W_RECENCY_T * comp.recency_score
+            + _W_ROOMS_T * comp.rooms_score
+            + _W_TERRAIN * comp.terrain_score,
+            4,
+        )
+    else:
+        comp.total_score = round(
+            _W_SURFACE * comp.surface_score
+            + _W_DISTANCE * comp.distance_score
+            + _W_RECENCY * comp.recency_score
+            + _W_ROOMS * comp.rooms_score,
+            4,
+        )

@@ -370,6 +370,10 @@ def comps_find(
     radius: float = typer.Option(
         5.0, "--radius", help="Distance radius (km) for the distance score."
     ),
+    terrain: float | None = typer.Option(
+        None, "--terrain",
+        help="Lot/land surface in m² (Maison only). Activates terrain scoring (25%% weight).",
+    ),
     surface_tol: float = typer.Option(
         0.25, "--surface-tol", help="Surface tolerance as a fraction (0.25 = ±25%)."
     ),
@@ -410,6 +414,7 @@ def comps_find(
             surface=surface,
             rooms=rooms,
             budget=budget,
+            surface_terrain=terrain,
             address=address,
             lat=anchor_lat,
             lon=anchor_lon,
@@ -433,6 +438,8 @@ def comps_find(
     target_tbl.add_row("Surface", f"{target.surface:.0f} m² (±{target.surface_tol*100:.0f}%)")
     if target.rooms:
         target_tbl.add_row("Pièces", str(target.rooms))
+    if target.surface_terrain:
+        target_tbl.add_row("Terrain", f"{target.surface_terrain:,.0f} m² (±50%)".replace(",", " "))
     if target.budget:
         target_tbl.add_row("Budget", f"{target.budget:,.0f} €".replace(",", " "))
     if anchor_label:
@@ -457,10 +464,14 @@ def comps_find(
         title=f"Top {len(result.comps)} comparables "
         f"(confidence: {result.confidence})"
     )
+    show_terrain = target.surface_terrain is not None and target.surface_terrain > 0
+
     comps_tbl.add_column("Score", justify="right")
     comps_tbl.add_column("Date")
     comps_tbl.add_column("Dist.", justify="right")
     comps_tbl.add_column("Surface", justify="right")
+    if show_terrain:
+        comps_tbl.add_column("Terrain", justify="right")
     comps_tbl.add_column("Pièces", justify="right")
     comps_tbl.add_column("État")
     comps_tbl.add_column("Adresse")
@@ -486,17 +497,22 @@ def comps_find(
         return f"[{color}]{label}{src}[/]" if color else f"{label}{src}"
 
     for c in result.comps:
-        comps_tbl.add_row(
+        row = [
             f"{c.total_score:.2f}",
             c.date_mutation,
             f"{c.distance_km:.2f} km" if c.distance_km is not None else "-",
             f"{c.surface:.0f} m²",
+        ]
+        if show_terrain:
+            row.append(f"{c.surface_terrain:,.0f} m²".replace(",", " ") if c.surface_terrain else "-")
+        row.extend([
             str(c.rooms) if c.rooms is not None else "-",
             fmt_condition(c.condition, c.condition_source),
             c.adresse,
             fmt_eur(c.valeur_fonciere),
             fmt_eur(c.prix_m2),
-        )
+        ])
+        comps_tbl.add_row(*row)
     console.print(comps_tbl)
 
     # Aggregate / suggested price fourchette

@@ -23,6 +23,7 @@ class Target:
 
     rooms: int | None = None
     budget: float | None = None          # target price in EUR (for the verdict)
+    surface_terrain: float | None = None  # lot size m² (Maison only, for scoring)
 
     address: str | None = None           # "12 rue des Alpes, 04100 Manosque"
     lat: float | None = None
@@ -75,6 +76,7 @@ class Comp:
     adresse: str
     lat: float | None
     lon: float | None
+    surface_terrain: float | None = None  # lot size m² (DVF)
 
     # Derived
     distance_km: float | None = None
@@ -82,6 +84,7 @@ class Comp:
     distance_score: float = 0.0
     recency_score: float = 0.0
     rooms_score: float = 0.0
+    terrain_score: float = 0.0
     total_score: float = 0.0
 
     # Condition info (populated from property_notes when available)

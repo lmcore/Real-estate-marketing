@@ -23,6 +23,7 @@ def _make_comp(**overrides) -> Comp:
         adresse="rue de test",
         lat=None,
         lon=None,
+        surface_terrain=None,
     )
     defaults.update(overrides)
     return Comp(**defaults)
@@ -158,3 +159,112 @@ def test_score_total_in_unit_interval():
     score_comp(comp, target, latest_year=2024)
     assert 0.0 <= comp.total_score <= 1.0
     assert not math.isnan(comp.total_score)
+
+
+# ── Terrain scoring tests ──────────────────────────────────────────────
+
+
+def test_terrain_score_exact_match():
+    """Exact terrain match → terrain_score = 1.0."""
+    target = Target(
+        commune="04112",
+        type_local="Maison",
+        surface=100,
+        surface_terrain=500.0,
+        rooms=4,
+    )
+    comp = _make_comp(surface=100, rooms=4, surface_terrain=500.0)
+    score_comp(comp, target, latest_year=2024)
+    assert comp.terrain_score == pytest.approx(1.0)
+
+
+def test_terrain_score_50pct_off_is_zero():
+    """At ±50% tolerance edge → terrain_score = 0.0."""
+    target = Target(
+        commune="04112",
+        type_local="Maison",
+        surface=100,
+        surface_terrain=500.0,
+    )
+    comp = _make_comp(surface=100, surface_terrain=250.0)  # 50% off
+    score_comp(comp, target, latest_year=2024)
+    assert comp.terrain_score == pytest.approx(0.0, abs=0.01)
+
+
+def test_terrain_score_25pct_off():
+    """At 25% error → terrain_score ≈ 0.5."""
+    target = Target(
+        commune="04112",
+        type_local="Maison",
+        surface=100,
+        surface_terrain=500.0,
+    )
+    comp = _make_comp(surface=100, surface_terrain=375.0)  # 25% off
+    score_comp(comp, target, latest_year=2024)
+    assert comp.terrain_score == pytest.approx(0.5, abs=0.01)
+
+
+def test_terrain_missing_is_neutral():
+    """When comp has no terrain data → neutral score."""
+    target = Target(
+        commune="04112",
+        type_local="Maison",
+        surface=100,
+        surface_terrain=500.0,
+    )
+    comp = _make_comp(surface=100, surface_terrain=None)
+    score_comp(comp, target, latest_year=2024)
+    assert comp.terrain_score == 0.5
+
+
+def test_terrain_weights_active_for_maison():
+    """With terrain target on Maison, terrain weight should be significant."""
+    target = Target(
+        commune="04112",
+        type_local="Maison",
+        surface=100,
+        surface_terrain=500.0,
+        rooms=4,
+        lat=43.833,
+        lon=5.783,
+    )
+    # Two identical comps except terrain.
+    big_lot = _make_comp(surface=100, rooms=4, year=2024, lat=43.833, lon=5.783, surface_terrain=500.0)
+    small_lot = _make_comp(surface=100, rooms=4, year=2024, lat=43.833, lon=5.783, surface_terrain=100.0)
+    score_comp(big_lot, target, latest_year=2024)
+    score_comp(small_lot, target, latest_year=2024)
+    assert big_lot.total_score > small_lot.total_score
+
+
+def test_no_terrain_target_uses_default_weights():
+    """Without surface_terrain on Target, terrain is not scored."""
+    target = Target(
+        commune="04112",
+        type_local="Maison",
+        surface=100,
+        rooms=4,
+        lat=43.833,
+        lon=5.783,
+    )
+    comp = _make_comp(surface=100, rooms=4, year=2024, lat=43.833, lon=5.783, surface_terrain=500.0)
+    score_comp(comp, target, latest_year=2024)
+    assert comp.terrain_score == 0.0  # not scored
+    assert comp.total_score == pytest.approx(1.0)  # perfect on all 4 default axes
+
+
+def test_appartement_ignores_terrain():
+    """For Appartement, terrain should never be scored even if provided."""
+    target = Target(
+        commune="04112",
+        type_local="Appartement",
+        surface=70,
+        rooms=3,
+    )
+    comp = Comp(
+        id_mutation="x", date_mutation="2024-06-01", year=2024,
+        type_local="Appartement", surface=70, rooms=3,
+        valeur_fonciere=200_000, prix_m2=2857, adresse="test",
+        lat=None, lon=None, surface_terrain=300.0,
+    )
+    score_comp(comp, target, latest_year=2024)
+    assert comp.terrain_score == 0.0
