@@ -197,3 +197,56 @@ CREATE TABLE IF NOT EXISTS listings (
 CREATE INDEX IF NOT EXISTS idx_listings_commune   ON listings (commune);
 CREATE INDEX IF NOT EXISTS idx_listings_matched   ON listings (matched_mutation_id);
 CREATE INDEX IF NOT EXISTS idx_listings_condition ON listings (condition);
+
+-- Saved forecaster scenarios: buy-renovate-sell profit projections.
+-- Each row is a self-contained snapshot of a forecast run so the user can
+-- compare scenarios side by side.
+CREATE TABLE IF NOT EXISTS forecasts (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    label                  TEXT,               -- user-chosen scenario name
+
+    -- Property inputs
+    commune                TEXT    NOT NULL,
+    type_local             TEXT    NOT NULL,
+    surface                REAL    NOT NULL,
+    rooms                  INTEGER,
+    surface_terrain        REAL,
+    lat                    REAL,
+    lon                    REAL,
+
+    -- Financial inputs
+    prix_achat             REAL    NOT NULL,
+    travaux                REAL    NOT NULL DEFAULT 0,
+    condition_achat        TEXT,
+    condition_revente      TEXT,
+    frais_notaire_pct      REAL,
+    tva_marge_pct          REAL,
+    portage_mois           INTEGER,
+    portage_mensuel_pct    REAL,
+    frais_agence_pct       REAL,
+
+    -- Results (snapshot)
+    prix_revente_low       REAL,
+    prix_revente_mid       REAL,
+    prix_revente_high      REAL,
+    prix_m2_median         REAL,
+    n_comps                INTEGER,
+    confidence             TEXT,
+
+    frais_notaire          REAL,
+    frais_portage          REAL,
+    total_investissement   REAL,
+    frais_agence           REAL,
+    tva_sur_marge          REAL,
+    marge_brute            REAL,
+    marge_nette            REAL,
+    marge_nette_low        REAL,
+    marge_nette_high       REAL,
+    roi_pct                REAL,
+    roi_annualise_pct      REAL,
+    verdict                TEXT,
+
+    created_at             TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_forecasts_commune ON forecasts (commune);

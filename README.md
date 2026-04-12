@@ -34,8 +34,8 @@ qu'un signal bruité et artificiel.
 | `comps` — biens comparables + géocodage BAN | ✅ v1 |
 | `notes` — annotations état du bien (condition, travaux) | ✅ v1 |
 | `listings` — capture d'annonces, matching DVF, stats par état | ✅ v1 |
+| `forecaster` — marge après travaux (marchand de biens) | ✅ v1 |
 | `dashboard` — Streamlit | ⏳ à venir |
-| `forecaster` — marge après travaux | ⏳ à venir |
 
 ## Installation
 
@@ -137,6 +137,28 @@ shadow-tester listings stats --commune 04112 --type Maison
 #     — nécessite ANTHROPIC_API_KEY (ou SHADOW_ANTHROPIC_API_KEY)
 shadow-tester listings add --url https://www.leboncoin.fr/... \
     --commune 04112 --analyze-photos
+
+# 12. Forecaster — marge après travaux (marchand de biens)
+#     — calcule la marge nette d'un projet achat-rénovation-revente
+shadow-tester forecaster run \
+    --commune 04112 --type Maison --surface 100 --rooms 4 \
+    --prix 200000 --travaux 50000 \
+    --condition a_renover --condition-revente renove \
+    --portage 12 --label "Projet rue des Alpes"
+
+#     — avec frais d'agence à la revente (5%)
+shadow-tester forecaster run \
+    --commune 04112 --type Maison --surface 100 \
+    --prix 180000 --travaux 40000 --agence-pct 5
+
+#     — lister les forecasts sauvegardés
+shadow-tester forecaster list --commune 04112
+
+#     — détail d'un forecast
+shadow-tester forecaster show 1
+
+#     — supprimer un forecast
+shadow-tester forecaster delete 1
 ```
 
 Exemple de sortie `summary` :
@@ -275,6 +297,36 @@ Configuration optionnelle (via env) :
 Les données brutes sont mises en cache dans `data/cache/` et chargées dans
 `data/shadow_tester.sqlite`.
 
+### Forecaster — marge après travaux (`forecaster run`)
+
+Le forecaster calcule la marge nette d'un projet d'achat-rénovation-revente,
+en s'appuyant sur les comparables DVF pour estimer le prix de revente.
+
+**Paramètres financiers (défauts MDB)** :
+
+| Paramètre | Défaut | Description |
+|---|---|---|
+| Frais notaire | 2.5 % | Droits réduits MDB (engagement revente < 5 ans) |
+| TVA sur marge | 20 % | TVA sur (prix revente − prix achat) |
+| Portage | 0.5 %/mois | Coût de portage mensuel (intérêts + assurance + divers) |
+| Agence | 0 % | Commission agence à la revente (0 si vente directe) |
+
+**Calcul** :
+
+```
+Total investissement = prix achat + frais notaire + travaux + portage
+Marge brute          = prix revente − total investissement
+TVA sur marge        = max(0, prix revente − prix achat) × 20%
+Marge nette          = marge brute − TVA − frais agence
+ROI                  = marge nette / total investissement × 100
+```
+
+Le prix de revente est estimé à partir des comparables DVF (P25 / médiane / P75),
+ce qui donne trois scénarios (bas / médian / haut). Le verdict tient compte
+du ROI et de la confiance (nombre de comps).
+
+Les forecasts sont sauvegardés en base pour comparer les scénarios.
+
 ## Structure
 
 ```
@@ -309,6 +361,10 @@ src/shadow_tester/
 │   ├── stats.py        # Stats agrégées par état (négo, délai, €/m²)
 │   ├── vision.py       # Analyse photos via Claude Vision (Anthropic API)
 │   └── repo.py         # CRUD SQLite
+├── forecaster/
+│   ├── models.py       # ForecastParams, ForecastResult (dataclasses)
+│   ├── engine.py       # calculate_forecast (comps + coûts MDB → marge)
+│   └── repo.py         # CRUD SQLite (save, list, get, delete)
 └── storage/
     ├── db.py           # Connexion SQLite
     └── schema.sql      # Schéma des tables

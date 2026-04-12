@@ -13,6 +13,14 @@ from shadow_tester.comps import Target, find_comparables, geocode
 from shadow_tester.comps.geocoding import GeocodingError
 from shadow_tester.config import get_settings
 from shadow_tester.dvf import compute_commune_stats, ingest_commune_years
+from shadow_tester.forecaster import (
+    ForecastParams,
+    calculate_forecast,
+    delete_forecast,
+    get_forecast,
+    list_forecasts,
+    save_forecast,
+)
 from shadow_tester.insee import (
     ingest_from_file,
     ingest_from_url,
@@ -63,11 +71,13 @@ insee_app = typer.Typer(help="INSEE commune indicators commands.", no_args_is_he
 comps_app = typer.Typer(help="Comparable-properties engine.", no_args_is_help=True)
 notes_app = typer.Typer(help="User property notes (condition, travaux, observations).", no_args_is_help=True)
 listings_app = typer.Typer(help="Capture & analyse real-estate listings.", no_args_is_help=True)
+forecaster_app = typer.Typer(help="Profit forecasting for buy-renovate-sell (marchand de biens).", no_args_is_help=True)
 app.add_typer(dvf_app, name="dvf")
 app.add_typer(insee_app, name="insee")
 app.add_typer(comps_app, name="comps")
 app.add_typer(notes_app, name="notes")
 app.add_typer(listings_app, name="listings")
+app.add_typer(forecaster_app, name="forecaster")
 
 console = Console()
 logger = logging.getLogger(__name__)
@@ -1244,6 +1254,310 @@ def listings_stats_cmd(
                 f"contre {worst.median_price_delta_pct:+.1f}% pour les "
                 f"[red]{_CONDITION_LABELS.get(worst.condition, worst.condition)}[/red]."
             )
+
+
+# ── Forecaster ──────────────────────────────────────────────────────────
+
+
+def _fmt_eur_fc(v: float | None) -> str:
+    if v is None:
+        return "-"
+    return f"{v:,.0f} \u20ac".replace(",", " ")
+
+
+@forecaster_app.command("run")
+def forecaster_run(
+    commune: str | None = typer.Option(None, "--commune", "-c", help="INSEE commune code."),
+    type_local: str = typer.Option(
+        ..., "--type", "-t", help="'Maison' or 'Appartement'.",
+    ),
+    surface: float = typer.Option(..., "--surface", "-s", help="Built surface in m\u00b2."),
+    prix_achat: float = typer.Option(
+        ..., "--prix", "-p", help="Purchase price in EUR.",
+    ),
+    travaux: float = typer.Option(
+        0, "--travaux", "-w", help="Renovation cost TTC in EUR.",
+    ),
+    rooms: int | None = typer.Option(None, "--rooms", "-r", help="Number of main rooms."),
+    terrain: float | None = typer.Option(
+        None, "--terrain", help="Lot surface in m\u00b2 (Maison only).",
+    ),
+    condition_achat: str = typer.Option(
+        "a_renover", "--condition", help="Current condition (brut/a_renover/partiel/renove).",
+    ),
+    condition_revente: str = typer.Option(
+        "renove", "--condition-revente", help="Target condition after works.",
+    ),
+    portage: int = typer.Option(12, "--portage", help="Holding period in months."),
+    notaire_pct: float = typer.Option(2.5, "--notaire-pct", help="Notaire fees (%% of purchase, default 2.5%% MDB)."),
+    tva_pct: float = typer.Option(20, "--tva-pct", help="TVA sur marge (%%, default 20)."),
+    portage_mensuel: float = typer.Option(0.5, "--portage-mensuel", help="Monthly carrying cost (%% of investment, default 0.5)."),
+    agence_pct: float = typer.Option(0, "--agence-pct", help="Agency commission at resale (%% of resale price, default 0)."),
+    address: str | None = typer.Option(
+        None, "--address", "-a", help="Exact address (geocoded via BAN for distance ranking).",
+    ),
+    lat: float | None = typer.Option(None, "--lat", help="Latitude."),
+    lon: float | None = typer.Option(None, "--lon", help="Longitude."),
+    street: str | None = typer.Option(None, "--street", help="Street keyword filter."),
+    radius: float = typer.Option(5.0, "--radius", help="Distance radius in km."),
+    years: int = typer.Option(5, "--years", help="Max age for DVF comps."),
+    limit: int = typer.Option(10, "--limit", "-n", help="Max comps."),
+    label: str | None = typer.Option(None, "--label", "-l", help="Scenario name."),
+    save: bool = typer.Option(True, "--save/--no-save", help="Save forecast to DB."),
+) -> None:
+    """Calculate profit margin for a buy-renovate-sell project."""
+    settings = get_settings()
+    code = commune or settings.default_commune
+
+    # Resolve geographic anchor.
+    anchor_lat, anchor_lon = lat, lon
+    if address and (lat is None or lon is None):
+        try:
+            geo_result = geocode(address, citycode=code)
+        except GeocodingError as exc:
+            console.print(f"[red]Geocoding failed:[/] {exc}")
+            raise typer.Exit(code=2) from exc
+        if geo_result is not None:
+            anchor_lat, anchor_lon = geo_result.lat, geo_result.lon
+            console.print(
+                f"[green]Geocoded[/] \u2192 {geo_result.label} "
+                f"(score {geo_result.score:.2f})"
+            )
+
+    try:
+        params = ForecastParams(
+            commune=code,
+            type_local=type_local,
+            surface=surface,
+            prix_achat=prix_achat,
+            rooms=rooms,
+            surface_terrain=terrain,
+            lat=anchor_lat,
+            lon=anchor_lon,
+            address=address,
+            street_keyword=street,
+            travaux=travaux,
+            condition_achat=condition_achat,
+            condition_revente=condition_revente,
+            frais_notaire_pct=notaire_pct / 100,
+            tva_marge_pct=tva_pct / 100,
+            portage_mois=portage,
+            portage_mensuel_pct=portage_mensuel / 100,
+            frais_agence_pct=agence_pct / 100,
+            radius_km=radius,
+            max_years_old=years,
+            comps_limit=limit,
+            label=label,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    result = calculate_forecast(params)
+
+    # ── Display: Investment breakdown ──
+    invest_tbl = Table(title="Investissement", show_header=False)
+    invest_tbl.add_column("Poste")
+    invest_tbl.add_column("Montant", justify="right")
+    invest_tbl.add_row("Prix d'achat", _fmt_eur_fc(result.prix_achat))
+    invest_tbl.add_row(
+        f"Frais notaire ({params.frais_notaire_pct*100:.1f}%)",
+        _fmt_eur_fc(result.frais_notaire),
+    )
+    invest_tbl.add_row("Travaux", _fmt_eur_fc(result.travaux))
+    invest_tbl.add_row(
+        f"Portage ({params.portage_mois} mois \u00d7 {params.portage_mensuel_pct*100:.1f}%/mois)",
+        _fmt_eur_fc(result.frais_portage),
+    )
+    invest_tbl.add_row(
+        "[bold]Total investissement[/]",
+        f"[bold]{_fmt_eur_fc(result.total_investissement)}[/]",
+    )
+    console.print(invest_tbl)
+
+    # ── Display: Resale estimate ──
+    if result.prix_revente_mid is not None:
+        resale_tbl = Table(
+            title=f"Estimation revente ({result.n_comps} comps, confiance {result.confidence})",
+            show_header=False,
+        )
+        resale_tbl.add_column("Scénario")
+        resale_tbl.add_column("Prix", justify="right")
+        resale_tbl.add_row("Bas (P25)", _fmt_eur_fc(result.prix_revente_low))
+        resale_tbl.add_row("[bold]Médian[/]", f"[bold]{_fmt_eur_fc(result.prix_revente_mid)}[/]")
+        resale_tbl.add_row("Haut (P75)", _fmt_eur_fc(result.prix_revente_high))
+        if result.prix_m2_median is not None:
+            resale_tbl.add_row("Médian \u20ac/m\u00b2", f"{result.prix_m2_median:,.0f} \u20ac".replace(",", " "))
+        console.print(resale_tbl)
+
+        # ── Display: Margin breakdown ──
+        margin_tbl = Table(title="Marge (sc\u00e9nario m\u00e9dian)", show_header=False)
+        margin_tbl.add_column("Poste")
+        margin_tbl.add_column("Montant", justify="right")
+        margin_tbl.add_row("Marge brute", _fmt_eur_fc(result.marge_brute))
+        if result.tva_sur_marge > 0:
+            margin_tbl.add_row(
+                f"TVA sur marge ({params.tva_marge_pct*100:.0f}%)",
+                f"[red]-{_fmt_eur_fc(result.tva_sur_marge)}[/]",
+            )
+        if result.frais_agence > 0:
+            margin_tbl.add_row(
+                f"Frais agence ({params.frais_agence_pct*100:.1f}%)",
+                f"[red]-{_fmt_eur_fc(result.frais_agence)}[/]",
+            )
+        color = "green" if (result.marge_nette or 0) > 0 else "red"
+        margin_tbl.add_row(
+            "[bold]Marge nette[/]",
+            f"[bold {color}]{_fmt_eur_fc(result.marge_nette)}[/]",
+        )
+        if result.roi_pct is not None:
+            margin_tbl.add_row("ROI", f"{result.roi_pct:+.1f}%")
+        if result.roi_annualise_pct is not None:
+            margin_tbl.add_row("ROI annualis\u00e9", f"{result.roi_annualise_pct:+.1f}%/an")
+        console.print(margin_tbl)
+
+        # Low / high range.
+        if result.marge_nette_low is not None and result.marge_nette_high is not None:
+            console.print(
+                f"\n[dim]Fourchette marge nette :[/] "
+                f"{_fmt_eur_fc(result.marge_nette_low)} (bas) \u2014 "
+                f"{_fmt_eur_fc(result.marge_nette_high)} (haut)"
+            )
+    else:
+        console.print("[yellow]Pas de comparables trouv\u00e9s \u2014 impossible d'estimer la revente.[/]")
+
+    # Verdict.
+    if result.verdict:
+        console.print(f"\n[bold]\u2192 {result.verdict}[/]")
+
+    # Save to DB.
+    if save:
+        save_forecast(result)
+        console.print(f"\n[dim]Forecast sauv\u00e9 (id={result.id})[/]")
+
+
+@forecaster_app.command("list")
+def forecaster_list(
+    commune: str | None = typer.Option(None, "--commune", "-c", help="Filter by commune."),
+) -> None:
+    """List saved forecast scenarios."""
+    forecasts = list_forecasts(commune=commune)
+    if not forecasts:
+        console.print("[yellow]Aucun forecast sauvegard\u00e9.[/]")
+        raise typer.Exit(code=0)
+
+    tbl = Table(title=f"{len(forecasts)} forecast(s)")
+    tbl.add_column("ID", justify="right")
+    tbl.add_column("Date")
+    tbl.add_column("Label")
+    tbl.add_column("Commune")
+    tbl.add_column("Type")
+    tbl.add_column("Surface", justify="right")
+    tbl.add_column("Achat", justify="right")
+    tbl.add_column("Travaux", justify="right")
+    tbl.add_column("Revente est.", justify="right")
+    tbl.add_column("Marge nette", justify="right")
+    tbl.add_column("ROI", justify="right")
+
+    for f in forecasts:
+        color = "green" if (f.marge_nette or 0) > 0 else "red"
+        tbl.add_row(
+            str(f.id),
+            (f.created_at or "")[:10],
+            f.params.label or "[dim]-[/]",
+            f.params.commune,
+            f.params.type_local,
+            f"{f.params.surface:.0f} m\u00b2",
+            _fmt_eur_fc(f.prix_achat),
+            _fmt_eur_fc(f.travaux),
+            _fmt_eur_fc(f.prix_revente_mid),
+            f"[{color}]{_fmt_eur_fc(f.marge_nette)}[/]",
+            f"{f.roi_pct:+.1f}%" if f.roi_pct is not None else "-",
+        )
+    console.print(tbl)
+
+
+@forecaster_app.command("show")
+def forecaster_show(
+    forecast_id: int = typer.Argument(..., help="Forecast ID to display."),
+) -> None:
+    """Display a saved forecast in detail."""
+    f = get_forecast(forecast_id)
+    if f is None:
+        console.print(f"[red]Forecast #{forecast_id} not found.[/]")
+        raise typer.Exit(code=1)
+
+    p = f.params
+    # Inputs panel.
+    inp_tbl = Table(title=f"Forecast #{f.id} \u2014 {p.label or 'sans nom'}", show_header=False)
+    inp_tbl.add_column("Champ")
+    inp_tbl.add_column("Valeur")
+    inp_tbl.add_row("Date", (f.created_at or "")[:19])
+    inp_tbl.add_row("Commune", p.commune)
+    inp_tbl.add_row("Type", p.type_local)
+    inp_tbl.add_row("Surface", f"{p.surface:.0f} m\u00b2")
+    if p.rooms:
+        inp_tbl.add_row("Pi\u00e8ces", str(p.rooms))
+    if p.surface_terrain:
+        inp_tbl.add_row("Terrain", f"{p.surface_terrain:,.0f} m\u00b2".replace(",", " "))
+    inp_tbl.add_row("Condition achat", p.condition_achat)
+    inp_tbl.add_row("Condition revente", p.condition_revente)
+    inp_tbl.add_row("Prix d'achat", _fmt_eur_fc(f.prix_achat))
+    inp_tbl.add_row("Travaux", _fmt_eur_fc(f.travaux))
+    inp_tbl.add_row(f"Frais notaire ({p.frais_notaire_pct*100:.1f}%)", _fmt_eur_fc(f.frais_notaire))
+    inp_tbl.add_row(f"Portage ({p.portage_mois} mois)", _fmt_eur_fc(f.frais_portage))
+    inp_tbl.add_row("[bold]Total invest.[/]", f"[bold]{_fmt_eur_fc(f.total_investissement)}[/]")
+    console.print(inp_tbl)
+
+    # Results panel.
+    if f.prix_revente_mid is not None:
+        res_tbl = Table(
+            title=f"R\u00e9sultats ({f.n_comps} comps, confiance {f.confidence})",
+            show_header=False,
+        )
+        res_tbl.add_column("M\u00e9trique")
+        res_tbl.add_column("Valeur", justify="right")
+        res_tbl.add_row("Revente bas (P25)", _fmt_eur_fc(f.prix_revente_low))
+        res_tbl.add_row("[bold]Revente m\u00e9dian[/]", f"[bold]{_fmt_eur_fc(f.prix_revente_mid)}[/]")
+        res_tbl.add_row("Revente haut (P75)", _fmt_eur_fc(f.prix_revente_high))
+        res_tbl.add_row("Marge brute", _fmt_eur_fc(f.marge_brute))
+        if f.tva_sur_marge:
+            res_tbl.add_row(f"TVA marge ({p.tva_marge_pct*100:.0f}%)", f"-{_fmt_eur_fc(f.tva_sur_marge)}")
+        if f.frais_agence:
+            res_tbl.add_row("Frais agence", f"-{_fmt_eur_fc(f.frais_agence)}")
+        color = "green" if (f.marge_nette or 0) > 0 else "red"
+        res_tbl.add_row("[bold]Marge nette[/]", f"[bold {color}]{_fmt_eur_fc(f.marge_nette)}[/]")
+        if f.roi_pct is not None:
+            res_tbl.add_row("ROI", f"{f.roi_pct:+.1f}%")
+        if f.roi_annualise_pct is not None:
+            res_tbl.add_row("ROI annualis\u00e9", f"{f.roi_annualise_pct:+.1f}%/an")
+        if f.marge_nette_low is not None and f.marge_nette_high is not None:
+            res_tbl.add_row(
+                "Fourchette nette",
+                f"{_fmt_eur_fc(f.marge_nette_low)} \u2014 {_fmt_eur_fc(f.marge_nette_high)}",
+            )
+        console.print(res_tbl)
+
+    if f.verdict:
+        console.print(f"\n[bold]\u2192 {f.verdict}[/]")
+
+
+@forecaster_app.command("delete")
+def forecaster_delete(
+    forecast_id: int = typer.Argument(..., help="Forecast ID to delete."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation."),
+) -> None:
+    """Delete a saved forecast."""
+    f = get_forecast(forecast_id)
+    if f is None:
+        console.print(f"[red]Forecast #{forecast_id} not found.[/]")
+        raise typer.Exit(code=1)
+
+    if not (yes or typer.confirm(f"Delete forecast #{forecast_id} ({f.params.label or 'sans nom'})?")):
+        console.print("[dim]Annul\u00e9.[/]")
+        raise typer.Exit(code=0)
+
+    delete_forecast(forecast_id)
+    console.print(f"[green]Forecast #{forecast_id} supprim\u00e9.[/]")
 
 
 @app.command("info")
