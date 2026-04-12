@@ -19,6 +19,15 @@ from shadow_tester.insee import (
     load_commune,
     summarize_commune,
 )
+from shadow_tester.notes import (
+    ALLOWED_CONDITIONS,
+    ALLOWED_SOURCES,
+    PropertyNote,
+    add_note,
+    delete_note,
+    get_note,
+    list_notes,
+)
 
 app = typer.Typer(
     help="Shadow Tester — demand analyzer for real-estate projects based on public data.",
@@ -27,9 +36,11 @@ app = typer.Typer(
 dvf_app = typer.Typer(help="DVF (Demandes de Valeurs Foncières) commands.", no_args_is_help=True)
 insee_app = typer.Typer(help="INSEE commune indicators commands.", no_args_is_help=True)
 comps_app = typer.Typer(help="Comparable-properties engine.", no_args_is_help=True)
+notes_app = typer.Typer(help="User property notes (condition, travaux, observations).", no_args_is_help=True)
 app.add_typer(dvf_app, name="dvf")
 app.add_typer(insee_app, name="insee")
 app.add_typer(comps_app, name="comps")
+app.add_typer(notes_app, name="notes")
 
 console = Console()
 logger = logging.getLogger(__name__)
@@ -424,12 +435,28 @@ def comps_find(
     comps_tbl.add_column("Dist.", justify="right")
     comps_tbl.add_column("Surface", justify="right")
     comps_tbl.add_column("Pièces", justify="right")
+    comps_tbl.add_column("État")
     comps_tbl.add_column("Adresse")
     comps_tbl.add_column("Prix", justify="right")
     comps_tbl.add_column("€/m²", justify="right")
 
+    _CONDITION_COLORS = {
+        "brut": "red",
+        "a_renover": "dark_orange",
+        "partiel": "yellow",
+        "renove": "green",
+    }
+
     def fmt_eur(v: float | None) -> str:
         return f"{v:,.0f} €".replace(",", " ") if v is not None else "-"
+
+    def fmt_condition(c_val: str | None, c_src: str | None) -> str:
+        if c_val is None:
+            return "[dim]-[/]"
+        color = _CONDITION_COLORS.get(c_val, "")
+        label = c_val.replace("_", " ")
+        src = f" ({c_src})" if c_src else ""
+        return f"[{color}]{label}{src}[/]" if color else f"{label}{src}"
 
     for c in result.comps:
         comps_tbl.add_row(
@@ -438,6 +465,7 @@ def comps_find(
             f"{c.distance_km:.2f} km" if c.distance_km is not None else "-",
             f"{c.surface:.0f} m²",
             str(c.rooms) if c.rooms is not None else "-",
+            fmt_condition(c.condition, c.condition_source),
             c.adresse,
             fmt_eur(c.valeur_fonciere),
             fmt_eur(c.prix_m2),
@@ -464,6 +492,166 @@ def comps_find(
             else "yellow"
         )
         console.print(f"[bold {color}]→ {result.verdict}[/]")
+
+
+# ---------- Notes subcommands ----------
+
+
+@notes_app.command("add")
+def notes_add(
+    condition: str = typer.Option(
+        ...,
+        "--condition",
+        "-c",
+        help=f"Property condition ({', '.join(ALLOWED_CONDITIONS)}). Aliases accepted.",
+    ),
+    source: str = typer.Option(
+        ...,
+        "--source",
+        "-s",
+        help=f"How you know ({', '.join(ALLOWED_SOURCES)}).",
+    ),
+    id_mutation: str | None = typer.Option(None, "--id-mutation", "-m", help="DVF mutation ID."),
+    adresse: str | None = typer.Option(None, "--address", "-a", help="Free-form address."),
+    commune: str | None = typer.Option(None, "--commune", help="INSEE commune code."),
+    lat: float | None = typer.Option(None, "--lat", help="Latitude."),
+    lon: float | None = typer.Option(None, "--lon", help="Longitude."),
+    travaux: float | None = typer.Option(None, "--travaux", help="Estimated renovation cost (EUR TTC)."),
+    prix_annonce: float | None = typer.Option(None, "--prix-annonce", help="Asking price seen in listing."),
+    note: str | None = typer.Option(None, "--note", "-n", help="Free-form observation."),
+) -> None:
+    """Add a note (condition, travaux, observations) on a property."""
+    if not id_mutation and not adresse:
+        raise typer.BadParameter(
+            "At least one of --id-mutation or --address is required."
+        )
+    try:
+        pn = PropertyNote(
+            condition=condition,
+            source=source,
+            id_mutation=id_mutation,
+            adresse=adresse,
+            commune=commune,
+            lat=lat,
+            lon=lon,
+            travaux_estime=travaux,
+            prix_annonce=prix_annonce,
+            note=note,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    saved = add_note(pn)
+    console.print(
+        f"[green]Note #{saved.id} ajoutée[/] — "
+        f"condition=[bold]{saved.condition}[/], source={saved.source}"
+    )
+    if saved.id_mutation:
+        console.print(f"  mutation: {saved.id_mutation}")
+    if saved.adresse:
+        console.print(f"  adresse:  {saved.adresse}")
+
+
+@notes_app.command("list")
+def notes_list(
+    commune: str | None = typer.Option(None, "--commune", "-c", help="Filter by commune."),
+    condition: str | None = typer.Option(None, "--condition", help="Filter by condition."),
+    limit: int = typer.Option(50, "--limit", "-n", help="Max notes to display."),
+) -> None:
+    """List property notes, most recent first."""
+    results = list_notes(commune=commune, condition=condition, limit=limit)
+    if not results:
+        console.print("[yellow]Aucune note trouvée.[/]")
+        return
+
+    tbl = Table(title=f"Notes ({len(results)})")
+    tbl.add_column("#", justify="right")
+    tbl.add_column("Condition")
+    tbl.add_column("Source")
+    tbl.add_column("Mutation")
+    tbl.add_column("Adresse")
+    tbl.add_column("Commune")
+    tbl.add_column("Travaux", justify="right")
+    tbl.add_column("Prix ann.", justify="right")
+    tbl.add_column("Mis à jour")
+
+    def fmt_eur(v: float | None) -> str:
+        return f"{v:,.0f} €".replace(",", " ") if v is not None else "-"
+
+    for n in results:
+        tbl.add_row(
+            str(n.id),
+            n.condition.replace("_", " "),
+            n.source,
+            n.id_mutation or "-",
+            (n.adresse or "-")[:40],
+            n.commune or "-",
+            fmt_eur(n.travaux_estime),
+            fmt_eur(n.prix_annonce),
+            (n.updated_at or "")[:10],
+        )
+    console.print(tbl)
+
+
+@notes_app.command("show")
+def notes_show(
+    note_id: int = typer.Argument(..., help="Note ID to display."),
+) -> None:
+    """Show detailed information about a single note."""
+    n = get_note(note_id)
+    if n is None:
+        console.print(f"[red]Note #{note_id} introuvable.[/]")
+        raise typer.Exit(code=1)
+
+    tbl = Table(title=f"Note #{n.id}", show_header=False)
+    tbl.add_column("Field")
+    tbl.add_column("Value")
+    tbl.add_row("Condition", n.condition.replace("_", " "))
+    tbl.add_row("Source", n.source)
+    if n.id_mutation:
+        tbl.add_row("Mutation DVF", n.id_mutation)
+    if n.adresse:
+        tbl.add_row("Adresse", n.adresse)
+    if n.commune:
+        tbl.add_row("Commune", n.commune)
+    if n.lat is not None and n.lon is not None:
+        tbl.add_row("Coordonnées", f"{n.lat:.5f}, {n.lon:.5f}")
+    if n.travaux_estime is not None:
+        tbl.add_row("Travaux estimés", f"{n.travaux_estime:,.0f} €".replace(",", " "))
+    if n.prix_annonce is not None:
+        tbl.add_row("Prix annonce", f"{n.prix_annonce:,.0f} €".replace(",", " "))
+    if n.note:
+        tbl.add_row("Note", n.note)
+    tbl.add_row("Créé le", n.created_at or "-")
+    tbl.add_row("Mis à jour", n.updated_at or "-")
+    console.print(tbl)
+
+
+@notes_app.command("delete")
+def notes_delete(
+    note_id: int = typer.Argument(..., help="Note ID to delete."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation."),
+) -> None:
+    """Delete a property note."""
+    n = get_note(note_id)
+    if n is None:
+        console.print(f"[red]Note #{note_id} introuvable.[/]")
+        raise typer.Exit(code=1)
+
+    if not yes:
+        console.print(
+            f"Supprimer la note #{note_id} ({n.condition}, "
+            f"{n.adresse or n.id_mutation}) ?"
+        )
+        confirm = typer.confirm("Confirmer ?")
+        if not confirm:
+            console.print("[dim]Annulé.[/]")
+            return
+
+    if delete_note(note_id):
+        console.print(f"[green]Note #{note_id} supprimée.[/]")
+    else:
+        console.print(f"[red]Échec de la suppression de #{note_id}.[/]")
 
 
 @app.command("info")

@@ -117,3 +117,32 @@ CREATE TABLE IF NOT EXISTS ban_cache (
     cached_at     TEXT    NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (query, citycode)
 );
+
+-- User-maintained notes on individual properties.
+-- This is the "ground truth" layer: anything the user has personally seen on
+-- a bien (visit, listing, estimate) lives here and overrides any automatic
+-- proxy (DPE, listings heuristics, vision). Rows can be anchored to a DVF
+-- mutation (via id_mutation) and/or to a free-form address.
+CREATE TABLE IF NOT EXISTS property_notes (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    -- Optional anchors — at least one of (id_mutation, adresse) must be set.
+    id_mutation     TEXT,               -- DVF mutation id if known
+    adresse         TEXT,               -- free-form address otherwise
+    commune         TEXT,               -- INSEE code, always zero-padded
+    lat             REAL,
+    lon             REAL,
+
+    -- Core payload
+    condition       TEXT    NOT NULL,   -- brut / a_renover / partiel / renove / inconnu
+    source          TEXT    NOT NULL,   -- visite / annonce / estimation / autre
+    travaux_estime  REAL,               -- € TTC estimated renovation cost
+    prix_annonce    REAL,               -- asking price if source = annonce
+    note            TEXT,               -- free-form text
+
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_property_notes_mutation ON property_notes (id_mutation);
+CREATE INDEX IF NOT EXISTS idx_property_notes_commune  ON property_notes (commune);

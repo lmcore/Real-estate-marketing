@@ -84,6 +84,10 @@ class Comp:
     rooms_score: float = 0.0
     total_score: float = 0.0
 
+    # Condition info (populated from property_notes when available)
+    condition: str | None = None           # brut / a_renover / partiel / renove
+    condition_source: str | None = None    # visite / annonce / estimation / autre
+
 
 @dataclass
 class CompResult:

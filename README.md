@@ -32,6 +32,8 @@ qu'un signal bruité et artificiel.
 | `market` — stats prix/m² | ✅ v1 (basique) |
 | `insee` — indicateurs communaux + affordability | ✅ v1 |
 | `comps` — biens comparables + géocodage BAN | ✅ v1 |
+| `notes` — annotations état du bien (condition, travaux) | ✅ v1 |
+| `listings` — capture d'annonces + matching DVF | ⏳ à venir |
 | `dashboard` — Streamlit | ⏳ à venir |
 | `forecaster` — marge après travaux | ⏳ à venir |
 
@@ -77,6 +79,22 @@ shadow-tester comps find \
 #    — ou par mot-clé de voie (filtre dur sur adresse_nom_voie)
 shadow-tester comps find \
     --commune 04112 --type Maison --surface 100 --street alpes
+
+# 7. Annoter l'état d'un bien (visite, annonce, estimation)
+shadow-tester notes add \
+    --condition "à rénover" --source visite \
+    --id-mutation 2024-123456 --commune 04112 \
+    --travaux 80000 --note "toiture + électricité à refaire"
+
+shadow-tester notes add \
+    --condition renove --source annonce \
+    --address "12 rue des Alpes, Manosque" \
+    --prix-annonce 285000
+
+# Lister / afficher / supprimer les notes
+shadow-tester notes list --commune 04112
+shadow-tester notes show 1
+shadow-tester notes delete 1
 ```
 
 Exemple de sortie `summary` :
@@ -180,6 +198,9 @@ src/shadow_tester/
 │   ├── geocoding.py    # Client BAN + cache SQLite (ban_cache)
 │   ├── scoring.py      # Haversine + sous-scores + pondération
 │   └── engine.py       # find_comparables (SQL + ranking + fourchette)
+├── notes/
+│   ├── models.py       # PropertyNote + validation condition/source
+│   └── repo.py         # CRUD SQLite (add, list, get, delete, update)
 └── storage/
     ├── db.py           # Connexion SQLite
     └── schema.sql      # Schéma des tables
