@@ -1571,7 +1571,12 @@ def dashboard(
     app_path = Path(__file__).resolve().parent / "dashboard" / "app.py"
     console.print(f"[green]Starting dashboard[/] on port {port}\u2026")
     subprocess.run(
-        [sys.executable, "-m", "streamlit", "run", str(app_path), "--server.port", str(port)],
+        [
+            sys.executable, "-m", "streamlit", "run", str(app_path),
+            "--server.port", str(port),
+            "--server.address", "0.0.0.0",
+            "--server.headless", "true",
+        ],
         check=False,
     )
 
